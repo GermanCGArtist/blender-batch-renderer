@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Built app and build output
+*.app/
+build/
+dist/
+
+# Local snapshots and system files
+*.tgz
+.DS_Store
+
+# Blender backups and render output
+*.blend1
+render/
+exmaple_render/
