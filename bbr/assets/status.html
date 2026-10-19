@@ -28,6 +28,12 @@
           background: #3a4268; color: #fff; }
   .pill.run { background: var(--blue); } .pill.stop { background: var(--warn); color: #000; }
   main { max-width: 980px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+  .mach { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+  .mach:first-child { border-top: 0; }
+  .mach .name { font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #888; }
+  .dot.rendering { background: #3d8bfd; } .dot.idle { background: #2fa84f; } .dot.downloading, .dot.loading { background: #c678dd; }
+  .dot.error { background: #dc3545; } .dot.paused { background: #e67e22; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
   .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
              margin: 0 0 10px; font-weight: 600; }
@@ -54,7 +60,9 @@
   .job .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .job .meta { font-size: 13px; color: var(--muted); }
   .job .right { text-align: right; font-size: 13px; }
-  .job.off { opacity: .5; }
+  .job.off, .mach.off { opacity: .5; }
+  .mach .meta { font-size: 13px; color: var(--muted); }
+  .mach .right { text-align: right; font-size: 13px; }
   .st { font-size: 12px; font-weight: 650; }
   .st.rendering { color: var(--blue); } .st.done { color: var(--ok); } .st.failed { color: var(--bad); }
   .st.stopped, .st.queued { color: var(--muted); } .st.hold { color: var(--hold); } .st.warn { color: var(--warn); }
@@ -98,6 +106,11 @@
       </div>
       <div><img class="thumb" id="l-thumb" alt=""></div>
     </div>
+  </section>
+  <section class="card" id="mach-card" style="display:none">
+    <h2>Machines</h2>
+    <div class="sub" id="mach-sum" style="margin-bottom:8px"></div>
+    <div id="machines"></div>
   </section>
   <section class="card">
     <h2>Queue</h2>
@@ -153,6 +166,30 @@ $("b-start").onclick = () => control("/api/v1/batch/start");
 $("b-after").onclick = () => control("/api/v1/batch/stop", {mode: "after_frame"});
 $("b-now").onclick = () => { if (confirm("Stop now? The current frame will be rendered again next time."))
                                control("/api/v1/batch/stop", {mode: "now"}); };
+
+function renderMachines(M) {
+  if (!M) { $("mach-card").style.display = "none"; return; }
+  $("mach-card").style.display = "";
+  const c = M.combined.batch;
+  let speed = 0;
+  for (const m of M.machines) if (m.online && m.batch.avg_frame_s) speed += 3600 / m.batch.avg_frame_s;
+  $("mach-sum").textContent = `${M.combined.online} online · ${M.combined.rendering} rendering · this batch ${c.frames} frames`
+    + (c.avg_frame_s ? ` · avg ${fmt(c.avg_frame_s)}/frame` : "") + (speed ? ` · together ≈ ${Math.round(speed)} frames/h` : "")
+    + (c.failed ? ` · ${c.failed} failed attempts` : "");
+  const rows = M.machines.slice().sort((a, b) => (a.kind !== "local") - (b.kind !== "local") || a.name.localeCompare(b.name));
+  $("machines").innerHTML = rows.map(m => {
+    const st = m.online ? (m.state || "idle") : "offline";
+    const L = m.live || {};
+    let now = L.job ? esc(L.job) + (L.frame != null ? ` · frame ${L.frame}` + (L.samples ? ` (${L.sample || 0}/${L.samples})` : "")
+              + (L.remaining_s != null ? ` · ${fmt(L.remaining_s)} left` : "") : "") : esc(m.note || "");
+    const b = m.batch, t = m.total;
+    return `<div class="mach${m.enabled ? "" : " off"}"><div><span class="dot ${st}"></span><span class="name">${esc(m.name)}</span>
+      <span class="muted"> ${esc(st)}${m.enabled ? "" : " · switched off"}${m.gpu ? " · " + esc(m.gpu) : ""}</span>
+      <div class="meta">${now}</div></div>
+      <div class="right">${b.frames} frames${b.avg_frame_s ? " · " + fmt(b.avg_frame_s) : ""}${b.failed ? " · " + b.failed + " failed" : ""}
+      <br><span class="muted">all time ${t.frames}</span></div></div>`;
+  }).join("");
+}
 
 function renderQueue(q) {
   const byFolder = {};
@@ -214,6 +251,7 @@ async function refresh() {
       }
     }
     renderQueue(q);
+    renderMachines(s.machines);
     if ($("cons").open) {
       const c = await api(`/api/v1/console?since=${consoleSeq}`);
       if (c.lines.length) {

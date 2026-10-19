@@ -54,6 +54,7 @@ class JobSettings:
     make_preview: bool = True
     preflight: bool = False
     restart_every: int = 0                # restart Blender every N frames (0 = never)
+    machines: List[str] = field(default_factory=list)   # machines allowed to render it ([] = all)
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobSettings":
@@ -77,6 +78,20 @@ class AppSettings:
     api_port: int = 8642
     api_allow_lan: bool = False           # also reachable from other devices on the home network
     api_key: str = ""                     # needed for access from other devices
+    # ---- rendering on several computers ----
+    mode: str = "coordinator"             # "coordinator" (keeps the queue) or "worker" (renders for one)
+    share_with_workers: bool = False      # coordinator: hand out frames to worker machines
+    render_locally: bool = True           # coordinator: this computer renders too
+    machines: dict = field(default_factory=dict)          # coordinator: known workers (enabled, totals)
+    pairing_code: str = ""                # coordinator: code a new worker enters once
+    worker_secret: str = ""               # coordinator: key handed to paired workers
+    worker_id: str = ""                   # worker: our id at the coordinator
+    worker_name: str = ""                 # worker: name shown on the coordinator ("" = computer name)
+    worker_server: str = ""               # worker: coordinator address, e.g. http://192.168.1.20:8642
+    worker_key: str = ""                  # worker: key received when pairing
+    worker_accepting: bool = True         # worker: take frames from the coordinator
+    worker_cache_gb: float = 50.0         # worker: keep job packages up to this size
+    worker_stats: dict = field(default_factory=dict)      # worker: lifetime statistics
     settings_version: int = 1
 
     @property
@@ -102,6 +117,20 @@ class AppSettings:
             s.api_key = secrets.token_urlsafe(18)
             changed = True
         if changed:
+            try:
+                s.save()
+            except OSError:
+                pass
+        if not s.worker_id:
+            import uuid as _uuid
+            s.worker_id = _uuid.uuid4().hex[:12]
+            try:
+                s.save()
+            except OSError:
+                pass
+        if not s.pairing_code:
+            import secrets as _secrets
+            s.pairing_code = "".join(_secrets.choice("0123456789") for _ in range(6))
             try:
                 s.save()
             except OSError:
@@ -147,6 +176,7 @@ class Job:
     group: str = ""                           # queue folder id ("" = top level)
     enabled: bool = True                      # unchecked jobs are skipped by the batch
     blend_stamp: Optional[List[float]] = None # [mtime, size] of the .blend when frames were rendered
+    package: Optional[dict] = None            # self-contained copy for other machines (manifest)
 
     # ---- folders -------------------------------------------------------
     @property
@@ -176,6 +206,10 @@ class Job:
     @property
     def tmp_dir(self) -> Path:
         return self.logs_dir / "tmp"
+
+    @property
+    def package_dir(self) -> Path:
+        return self.folder_p / "package"
 
     @property
     def job_file(self) -> Path:

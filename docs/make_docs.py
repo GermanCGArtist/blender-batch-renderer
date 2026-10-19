@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(HERE, "Blender_Batch_Renderer_Documentation.pdf")
 ICON = os.path.join(ROOT, "bbr", "assets", "icon.png")
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 F = "/usr/share/fonts/truetype/dejavu/"
 G = "/usr/share/fonts/truetype/google-fonts/"
@@ -251,6 +251,27 @@ def architecture_diagram():
     return d
 
 
+def network_diagram():
+    W, H = 482, 214
+    d = Drawing(W, H)
+    box(d, 160, 112, 162, 88, "Coordinator", "the queue, the job folders,\nframes end up here\nhands out frames (leases)\nmay render too",
+        fill=NOTE, stroke=ORANGE)
+    box(d, 6, 8, 140, 74, "Worker: PC (LAN)", "Windows, NVIDIA GPU\nBlender 5.2 + add-ons\ncache of job copies")
+    box(d, 336, 8, 140, 74, "Worker: MacBook (Wi-Fi)", "macOS, Apple GPU\nBlender 5.2 + add-ons\ncache of job copies")
+    for x1, x2, side in ((76, 190, "start"), (406, 292, "end")):
+        arrow(d, x1 + (8 if side == "start" else -8), 82, x2, 112)
+        arrow(d, x2 + (14 if side == "start" else -14), 112, x1 + (22 if side == "start" else -22), 82)
+    d.add(String(96, 108, "hello, lease, heartbeat,", fontName="Body", fontSize=6.6, fillColor=MUTED, textAnchor="middle"))
+    d.add(String(96, 99, "finished frames ↑", fontName="Body", fontSize=6.6, fillColor=MUTED, textAnchor="middle"))
+    d.add(String(386, 108, "job copy (zip, once) ↓", fontName="Body", fontSize=6.6, fillColor=MUTED, textAnchor="middle"))
+    d.add(String(386, 99, "next frame, stop signals ↓", fontName="Body", fontSize=6.6, fillColor=MUTED, textAnchor="middle"))
+    d.add(String(241, 50, "home network, HTTP on port 8642", fontName="Body-Bold", fontSize=7.2, fillColor=NAVY,
+                 textAnchor="middle"))
+    d.add(String(241, 39, "discovery: UDP 8643 · paired once with a 6-digit code", fontName="Body", fontSize=6.8,
+                 fillColor=MUTED, textAnchor="middle"))
+    return d
+
+
 def lifecycle_diagram():
     W, H = 482, 150
     d = Drawing(W, H)
@@ -401,6 +422,8 @@ def build():
         "double-click a queue file to open it.",
         "<b>Status page in any browser</b> (also on your phone) and a <b>web API</b> for other tools.",
         "<b>Blender add-on</b> “Send to Batch Renderer” – add the open file to the queue from inside Blender.",
+        "<b>Rendering on several computers</b> – frames of an animation are shared with worker computers on the "
+        "home network (Windows, macOS, Linux; any GPU), with statistics per machine and combined.",
         "<b>Keyboard shortcuts</b> for everything you do often.",
         "Runs on macOS (tested), Windows and Linux; also usable from the command line.",
     ])
@@ -882,15 +905,94 @@ curl -X POST -H "X-BBR-Request: 1" \\
 
     # 15 ---------------------------------------------------------------
     s.append(PageBreak())
-    s.append(H1("15  How it works"))
-    s.append(Fig(architecture_diagram(), "Figure 3 – Components and data flow."))
+    s.append(H1("15  Rendering on several computers"))
+    s.append(P("Several computers can render the frames of the same animation together. One of them – the "
+               "<b>coordinator</b> – has the queue as usual. The others run the same app in <b>worker</b> mode: they "
+               "ask the coordinator for frames, render them and send them back. Finished frames, reports and the "
+               "preview end up in the coordinator's job folders exactly as if it had rendered everything itself. "
+               "No shared folder or NAS is needed: the app transfers everything itself."))
+    s.append(Fig(network_diagram(), "Figure 3 – A coordinator with two workers."))
+    s.append(H2("15.1  Setting it up"))
+    s += bullets([
+        "<b>On every computer</b>: install the app and the Blender version(s) your files need, plus the add-ons your "
+        "scenes use (for example LensSim). Add-ons are not copied between machines – each one needs its own "
+        "installation (and licence). Enable them in Blender's preferences as usual.",
+        "<b>On the coordinator</b>: open the <b>Machines</b> tab and tick <i>Share jobs with worker computers</i>. "
+        "The tab shows a 6-digit <b>pairing code</b> and the address workers connect to. When the firewall asks, "
+        "allow incoming connections for the app.",
+        "<b>On each worker</b>: switch the mode (top right of the window) to <b>Worker</b>. Press <i>Find on "
+        "network</i> (or type the coordinator's address), enter the pairing code and press <i>Pair</i>. This is "
+        "needed only once; afterwards the worker connects by itself whenever both apps are running.",
+        "Press <b>Start</b> on the coordinator as usual. Workers that are online and switched on join in.",
+    ])
+    s.append(note("The mode switch, sharing and the worker's settings are <b>locked while something is rendering</b>. "
+                  "On a worker, use <i>Pause after this frame</i> or <i>Stop now</i> instead.", "Locked while rendering"))
+    s.append(H2("15.2  What happens"))
+    s += bullets([
+        "<b>The job copy.</b> Before the first worker renders a job, the coordinator makes a self-contained copy: "
+        "the .blend with its textures packed, every <b>linked library</b> (also libraries linked by libraries), and "
+        "external files that cannot be packed (image sequences, movies, Alembic/USD caches, VDB volumes). The "
+        "copy is zipped once per version of the .blend; your original files are not changed. Each worker downloads "
+        "it once (the download resumes after a dropped connection) and keeps it in its cache.",
+        "<b>Frames, not ranges.</b> Workers ask for one frame at a time and keep Blender open between frames, "
+        "so a fast PC simply renders more frames than a laptop. Each frame is <i>leased</i> to one machine; while "
+        "a worker sends its heartbeat every few seconds, the lease stays valid.",
+        "<b>Delivery.</b> A finished frame is sent to the coordinator right away (in the background – Blender "
+        "already renders the next one) and saved there via a temporary name, like local frames. The worker "
+        "deletes its copy once the coordinator confirmed it.",
+        "<b>Add-ons and versions.</b> The coordinator detects which add-ons a file uses (from its node groups, "
+        "custom properties and render handlers) and gives frames only to workers with the same Blender version "
+        "(major.minor) and those add-ons enabled. The Machines tab shows why a worker gets no frames.",
+        "<b>Render engines.</b> Cycles, EEVEE and Workbench are supported. Cycles uses each worker's own device "
+        "preferences (OptiX/CUDA on NVIDIA, Metal on Apple Silicon); the device shows in the Machines tab.",
+    ])
+    s.append(H2("15.3  Stopping, failures and lost machines"))
+    s.append(table([
+        ["Situation", "What happens"],
+        ["Stop after frame", "Every machine finishes and delivers the frame it is working on, then the batch stops."],
+        ["Stop now / Cancel job", "Every machine drops its frame at once; nothing is counted as failed."],
+        ["A worker crashes on a frame", "The frame counts one failed attempt (with the machine's name) and goes "
+                                        "preferably to another machine. A worker that keeps crashing on a job or "
+                                        "cannot open it is taken off that job for the rest of the batch."],
+        ["A worker disappears (sleep, Wi-Fi drop, quit)", "After 45 seconds without a heartbeat its frame goes back "
+                                                          "into the pool. A frame it finishes later is still "
+                                                          "accepted if nobody delivered it meanwhile."],
+        ["The coordinator quits", "Workers finish their frame and keep it until the coordinator is back, then deliver it."],
+        ["The .blend is saved again", "A new job copy is made for new frames; the usual on-hold rule (7.2) applies."],
+    ], [52, 118]))
+    s.append(H2("15.4  Statistics"))
+    s += bullets([
+        "<b>Machines tab</b> (coordinator): per machine its state, what it is rendering (frame, samples, Blender's "
+        "remaining time), device, Blender versions and add-ons, frames this batch, average frame time, failed "
+        "attempts, data, and all-time totals; above the table the combined figures and the speed of all machines "
+        "together (frames per hour). Untick a machine to leave it out (when no batch is running).",
+        "<b>Live tab</b>: frames per machine for the selected job, which frames are being rendered where, and the "
+        "size of the job copy. Time remaining uses the combined speed of all machines that can render the job.",
+        "<b>Reports</b>: <font face='Mono'>frames.csv</font> has a <i>machine</i> column; <font face='Mono'>"
+        "report.xlsx</font> gets a <b>Machines</b> sheet (frames, share, render time, average / fastest / slowest "
+        "frame, failed attempts, disk) with charts.",
+        "<b>Worker window</b>: this session and all time, per job; the frame being rendered with samples, "
+        "remaining time, memory and device; downloads; the Blender console.",
+        "<b>Status page</b>: a Machines section with the same per-machine and combined figures.",
+    ])
+    s.append(H2("15.5  Security"))
+    s.append(P("Sharing makes the app reachable on the home network. Workers need the key they received when "
+               "pairing (the pairing code only works while sharing is on, and repeated wrong codes are blocked). "
+               "Without that key, nothing can be downloaded or uploaded. The status page still needs its own key for "
+               "other devices. Use the app only on networks you trust; for working away from home use a VPN such "
+               "as Tailscale."))
+
+    # 16 ---------------------------------------------------------------
+    s.append(PageBreak())
+    s.append(H1("16  How it works"))
+    s.append(Fig(architecture_diagram(), "Figure 4 – Components and data flow."))
     s.append(P("The app has three layers. The <b>window</b> (Qt) shows the queue and live data and sends commands. "
                "The <b>runner</b> runs in a background thread: it picks the next runnable job, performs the safety "
                "checks, starts Blender as a separate process, reads its output line by line, samples its memory, "
                "handles stops, timeouts and retries, and saves state. <b>Blender</b> runs headless with a small "
                "script (<font face='Mono'>bbr_render.py</font>) that applies the overrides, renders frame by frame "
                "and reports back."))
-    s.append(H2("15.1  Communication with Blender"))
+    s.append(H2("16.1  Communication with Blender"))
     s.append(P("The render script prints one line per event, starting with <font face='Mono'>BBR_</font> followed by "
                "JSON. Everything else Blender prints is kept as console output."))
     s.append(table([
@@ -905,15 +1007,19 @@ curl -X POST -H "X-BBR-Request: 1" \\
         ["BBR_FRAME_ERROR / BBR_FATAL", "A frame failed / the job cannot be rendered at all."],
         ["BBR_CHUNK_DONE / BBR_ALL_DONE", "Planned restart point reached / every frame finished."],
         ["BBR_WARN", "A note for the user (e.g. output switched to PNG)."],
+        ["BBR_NEED_FRAME", "Blender asks which frame to render next; the app answers on Blender's input with "
+                           "<font face='Mono'>FRAME n</font> or <font face='Mono'>DONE</font>. This is how frames are "
+                           "shared between machines while Blender stays open."],
+        ["BBR_PACKAGE / BBR_ADDONS", "Result of making a job copy / list of enabled add-ons."],
     ], [48, 122]))
     s.append(P("Blender versions up to 4.x also print their own status lines (<font face='Mono'>Fra:… | Time:… | "
                "Remaining:… | Sample …</font>); these are read as well."))
-    s.append(H2("15.2  Stopping cleanly"))
+    s.append(H2("16.2  Stopping cleanly"))
     s.append(P("Blender runs in its own process group. <i>Stop now</i> sends it a terminate signal and, if it has not "
                "ended after five seconds, kills it. <i>Stop after frame</i> waits for the next <font face='Mono'>"
                "BBR_FRAME_DONE</font> and then ends Blender while it is between frames. A frame interrupted by the "
                "user is never counted as a failed attempt."))
-    s.append(H2("15.3  Estimates"))
+    s.append(H2("16.3  Estimates"))
     s += bullets([
         "<b>Job time remaining</b> = Blender's remaining time for the current frame + (frames left − 1) × the "
         "average of the last ten frames.",
@@ -922,7 +1028,7 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "start is not included.",
         "<b>Projected disk use</b> = average frame size × number of frames.",
     ])
-    s.append(H2("15.4  Source code layout"))
+    s.append(H2("16.4  Source code layout"))
     s.append(table([
         ["File", "Purpose"],
         ["bbr/models.py", "Job, job settings and app settings; frame bookkeeping and estimates."],
@@ -939,14 +1045,18 @@ curl -X POST -H "X-BBR-Request: 1" \\
         ["bbr/api.py, bbr/control.py", "Web server, status page, API routes and security; what the API can read and do."],
         ["bbr/assets/status.html", "The status page (plain HTML and JavaScript)."],
         ["bbr/gui/api_bridge.py", "Runs API requests on the window's thread."],
+        ["bbr/scheduler.py", "Leases: which machine renders which frame; machines and their statistics."],
+        ["bbr/workerapi.py, bbr/worker.py", "Coordinator endpoints for workers and discovery; the worker client."],
+        ["bbr/package.py", "Makes the self-contained job copy (with blender_scripts/bbr_package.py)."],
+        ["bbr/gui/machines_view.py, worker_view.py", "Machines tab; the window in worker mode."],
         ["blender_addon/", "The “Send to Batch Renderer” add-on for Blender."],
         ["bbr.spec, build_app.command", "Building the trimmed macOS app."],
         ["tests/", "Engine, API, queue-file and add-on tests with a simulated Blender."],
         ["tools/make_icon.py, docs/make_docs.py", "Draws the app icon; builds this document."],
     ], [62, 108]))
 
-    # 14 ---------------------------------------------------------------
-    s.append(H1("16  Command line"))
+    # 17 ---------------------------------------------------------------
+    s.append(H1("17  Command line"))
     s.append(P("Everything except the window is also available in a terminal, from the app's source folder:"))
     s.append(code("""
 .venv/bin/python -m bbr scan                       # find Blender installs and save them
@@ -956,13 +1066,15 @@ curl -X POST -H "X-BBR-Request: 1" \\
         --blender auto --no-preview --preflight
 .venv/bin/python -m bbr list                       # queue with status and progress
 .venv/bin/python -m bbr run                        # render the queue; Ctrl+C = stop now
+.venv/bin/python -m bbr worker --code 123456       # be a worker (finds the coordinator, pairs once)
+.venv/bin/python -m bbr worker --server 192.168.1.20 --name "Render PC"
 """))
     s.append(Spacer(1, 6))
     s.append(P("The command line and the window share the same queue, settings and lock – only one of them can "
                "render at a time. <font face='Mono'>run</font> also starts the status page and API."))
 
-    # 15 ---------------------------------------------------------------
-    s.append(H1("17  Troubleshooting &amp; limitations"))
+    # 18 ---------------------------------------------------------------
+    s.append(H1("18  Troubleshooting &amp; limitations"))
     s.append(table([
         ["Symptom", "What to do"],
         ["A job is <i>on hold</i>", "Its .blend changed or is missing – see the status note and section 7.2."],
@@ -984,6 +1096,12 @@ curl -X POST -H "X-BBR-Request: 1" \\
         ["Phone cannot reach the page", "Tick <i>Allow other devices…</i>, use the copied link (it contains the key), make "
                                         "sure the phone is on the same Wi-Fi, and allow the app in the Mac's firewall."],
         ["Add-on: \u201cnot running\u201d", "Start the app; check that the port in the add-on's preferences matches the app."],
+        ["A worker gets no frames", "The Machines tab says why: other Blender version, missing add-on, switched off, "
+                                    "or the job copy could not be made (Messages tab)."],
+        ["Worker cannot find the coordinator", "Both on the same network? Sharing on? Type the address shown in the "
+                                               "Machines tab; allow the app in the firewall (Windows asks on first use)."],
+        ["Frames from a worker look different", "Compare Blender version, add-on versions and colour management; "
+                                                "render a test frame on each machine."],
     ], [56, 114]))
     s.append(H2("Known limitations"))
     s += bullets([
@@ -996,6 +1114,10 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "Unbaked simulations may differ after a resume – bake them first.",
         "Each Blender start loads your add-ons; slow add-ons add time to every start (and every planned restart).",
         "Only the active scene of a file is rendered; put view layers you want separately into separate files.",
+        "Several computers: simulation caches on disk (and fluid caches) are not included in the job copy yet – "
+        "bake them into the file or render such jobs on the coordinator. Third-party render engines are not "
+        "supported for sharing yet. Add-ons are detected by heuristics; a scene that uses an add-on only through "
+        "a driver or script may not be recognised.",
     ])
     s.append(H2("Testing"))
     s.append(P("<font face='Mono'>python3 tests/test_api.py</font> tests the API and its security, queue files, the default "
@@ -1003,7 +1125,11 @@ curl -X POST -H "X-BBR-Request: 1" \\
                "crashes and retries, frames that always fail, stop and resume, quitting mid-render, files that do not "
                "load, missing camera, video-to-PNG switching and overrides, cancelling, re-attaching, Blender-5-style "
                "output, planned restarts, full disk, free-space limit, changed and missing .blend files, moved render "
-               "folders, folders and the single-instance lock."))
+               "folders, folders and the single-instance lock. <font face='Mono'>python3 tests/test_distributed.py</font> "
+               "simulates a coordinator with workers: job copies with nested linked libraries and add-on detection, "
+               "pairing and access checks, discovery, faster and slower workers, a missing add-on, crashing "
+               "workers, a worker that disappears, stop now / stop after frame, and the coordinator rendering "
+               "together with a worker."))
 
     return s
 

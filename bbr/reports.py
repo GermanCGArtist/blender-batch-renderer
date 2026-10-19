@@ -12,7 +12,7 @@ import time
 from typing import Optional
 
 FRAME_COLS = ["frame", "status", "attempt_no", "attempts_for_frame", "finished_at", "render_s",
-              "save_s", "blender_peak_mb", "process_peak_mb", "samples", "size_bytes", "file", "error"]
+              "save_s", "blender_peak_mb", "process_peak_mb", "samples", "size_bytes", "file", "error", "machine"]
 ATTEMPT_COLS = ["attempt", "started", "ended", "duration_s", "frames_rendered", "exit_code",
                 "reason", "blender", "peak_rss_mb", "log"]
 
@@ -42,6 +42,7 @@ def append_frame(job, frame: int, rec: dict, attempt_no: int) -> None:
             "process_peak_mb": _r(rec.get("process_peak_mb")),
             "samples": rec.get("samples") or "", "size_bytes": rec.get("size") or "",
             "file": rec.get("file") or "", "error": rec.get("last_error", "") if rec.get("status") != "done" else "",
+            "machine": rec.get("machine") or "",
         })
     except OSError:
         pass
@@ -68,6 +69,33 @@ def _r(v, nd=3):
         return round(float(v), nd)
     except (TypeError, ValueError):
         return v
+
+
+def machine_stats(job) -> list:
+    """Per machine: frames, share, render time, average/fastest/slowest frame, failed attempts, bytes."""
+    out = {}
+    for k, r in list(job.frames.items()):
+        if r.get("status") == "done":
+            name = r.get("machine") or "this computer"
+            d = out.setdefault(name, {"machine": name, "frames": 0, "render_s": 0.0, "times": [],
+                                      "failed_attempts": 0, "bytes": 0})
+            d["frames"] += 1
+            d["bytes"] += int(r.get("size") or 0)
+            if r.get("render_s"):
+                d["render_s"] += float(r["render_s"])
+                d["times"].append(float(r["render_s"]))
+        for fm in r.get("failed_on") or []:
+            d = out.setdefault(fm, {"machine": fm, "frames": 0, "render_s": 0.0, "times": [],
+                                    "failed_attempts": 0, "bytes": 0})
+            d["failed_attempts"] += 1
+    total = sum(d["frames"] for d in out.values()) or 1
+    for d in out.values():
+        t = d.pop("times")
+        d["avg_frame_s"] = sum(t) / len(t) if t else None
+        d["min_s"] = min(t) if t else None
+        d["max_s"] = max(t) if t else None
+        d["share"] = d["frames"] / total
+    return sorted(out.values(), key=lambda d: -d["frames"])
 
 
 def write_xlsx(job) -> Optional[str]:
@@ -100,7 +128,7 @@ def write_xlsx(job) -> Optional[str]:
     wsf = wb.active
     wsf.title = "Frames"
     cols = ["Frame", "Status", "Attempts", "Render time (s)", "Save time (s)", "Blender peak mem (MB)",
-            "Process peak mem (MB)", "Samples", "File size (MB)", "Finished at", "File / last error"]
+            "Process peak mem (MB)", "Samples", "File size (MB)", "Finished at", "File / last error", "Machine"]
     header(wsf, cols)
     recs = sorted(list(job.frames.items()), key=lambda kv: int(kv[0]))
     for k, r in recs:
@@ -108,8 +136,9 @@ def write_xlsx(job) -> Optional[str]:
         wsf.append([int(k), r.get("status"), r.get("attempts"), _r(r.get("render_s")), _r(r.get("save_s")),
                     _r(r.get("blender_peak_mb"), 1), _r(r.get("process_peak_mb"), 1), r.get("samples"),
                     _r(size / 1048576, 2) if size else None, _ts(r.get("finished_at")),
-                    r.get("file") if r.get("status") == "done" else r.get("last_error", "")])
-    widths(wsf, [8, 10, 9, 15, 13, 20, 20, 9, 13, 20, 60])
+                    r.get("file") if r.get("status") == "done" else r.get("last_error", ""),
+                    r.get("machine") or ""])
+    widths(wsf, [8, 10, 9, 15, 13, 20, 20, 9, 13, 20, 60, 18])
     n = len(recs)
 
     # ---------------- Attempts ----------------
@@ -122,6 +151,19 @@ def write_xlsx(job) -> Optional[str]:
                     a.get("frames_rendered"), a.get("exit_code"), a.get("reason"), a.get("blender"),
                     _r(a.get("peak_rss_mb"), 1), a.get("log")])
     widths(wsa, [9, 20, 20, 13, 15, 10, 50, 22, 20, 60])
+
+    # ---------------- Machines ----------------
+    per = machine_stats(job)
+    wsm = None
+    if per:
+        wsm = wb.create_sheet("Machines")
+        header(wsm, ["Machine", "Frames", "Share (%)", "Render time (s)", "Average frame (s)",
+                     "Fastest (s)", "Slowest (s)", "Failed attempts", "Disk (MB)"])
+        for d in per:
+            wsm.append([d["machine"], d["frames"], _r(d["share"] * 100, 1), _r(d["render_s"], 1),
+                        _r(d["avg_frame_s"], 2), _r(d["min_s"], 2), _r(d["max_s"], 2), d["failed_attempts"],
+                        _r(d["bytes"] / 1048576, 1)])
+        widths(wsm, [24, 9, 10, 15, 17, 11, 11, 15, 11])
 
     # ---------------- Summary ----------------
     ws = wb.create_sheet("Summary", 0)
@@ -157,6 +199,8 @@ def write_xlsx(job) -> Optional[str]:
         ("Peak Blender memory (MB)", round(max(bpeaks), 1) if bpeaks else None),
         ("Peak process memory (MB)", round(max(peaks), 1) if peaks else None),
         ("Disk used by frames", fmt_bytes(job.used_bytes())),
+        ("Machines", ", ".join(f"{d['machine']} ({d['frames']})" for d in per) if len(per) > 1 else
+         (per[0]["machine"] if per else None)),
         ("Preview video", job.preview_path),
         ("Report written", _ts(time.time())),
     ]
@@ -165,7 +209,7 @@ def write_xlsx(job) -> Optional[str]:
         ws.cell(ws.max_row, 1).font = Font(bold=True)
         ws.cell(ws.max_row, 2).alignment = Alignment(horizontal="left")
     widths(ws, [30, 55])
-    for sheet in (ws, wsf, wsa):
+    for sheet in [x for x in (ws, wsf, wsa, wsm) if x is not None]:
         sheet.sheet_properties.pageSetUpPr.fitToPage = True
         sheet.page_setup.fitToWidth = 1
         sheet.page_setup.fitToHeight = 0
@@ -192,6 +236,19 @@ def write_xlsx(job) -> Optional[str]:
         c3.set_categories(xref)
         c3.height, c3.width = 9, 22
         ws.add_chart(c3, "D40")
+    if wsm is not None and len(per) > 1:
+        c4 = BarChart()
+        c4.title, c4.y_axis.title = "Frames and average frame time per machine", "frames"
+        c4.add_data(Reference(wsm, min_col=2, min_row=1, max_row=len(per) + 1), titles_from_data=True)
+        c4.set_categories(Reference(wsm, min_col=1, min_row=2, max_row=len(per) + 1))
+        c4.height, c4.width = 8, 16
+        wsm.add_chart(c4, "B%d" % (len(per) + 4))
+        c5 = BarChart()
+        c5.title, c5.y_axis.title = "Average frame time per machine", "seconds"
+        c5.add_data(Reference(wsm, min_col=5, min_row=1, max_row=len(per) + 1), titles_from_data=True)
+        c5.set_categories(Reference(wsm, min_col=1, min_row=2, max_row=len(per) + 1))
+        c5.height, c5.width = 8, 16
+        wsm.add_chart(c5, "K%d" % (len(per) + 4))
 
     out = job.data_dir / "report.xlsx"
     tmp = job.data_dir / ".tmp_report.xlsx"

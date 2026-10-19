@@ -113,11 +113,15 @@ def file_output_nodes(scene):
     return [n for n in tree.nodes if n.bl_idname == "CompositorNodeOutputFile" and not n.mute]
 
 
+def safe_dir_name(name):
+    return re.sub(r"[^\w.\-]+", "_", name) or "file_output"
+
+
 def redirect_file_outputs(scene, frames_dir):
     """Point compositor File Output nodes into frames/<node name>/."""
     done = []
     for node in file_output_nodes(scene):
-        safe = re.sub(r"[^\w.\-]+", "_", node.name) or "file_output"
+        safe = safe_dir_name(node.name)
         d = os.path.join(frames_dir, safe) + os.sep
         if hasattr(node, "directory"):
             node.directory = d
@@ -185,3 +189,93 @@ def scene_info(scene):
         "file_output_nodes": [n.name for n in file_output_nodes(scene)],
         "persistent_data": getattr(r, "use_persistent_data", None),
     }
+
+
+# ---- add-ons ------------------------------------------------------------------
+def _norm(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def enabled_addons():
+    """{module: {"module", "name", "version", "bundled"}} for every enabled add-on / extension."""
+    import addon_utils
+    enabled = set(bpy.context.preferences.addons.keys())
+    try:
+        system_scripts = os.path.normpath(bpy.utils.system_resource("SCRIPTS"))
+    except Exception:
+        system_scripts = ""
+    out = {}
+    for mod in addon_utils.modules(refresh=False):
+        name = mod.__name__
+        if name not in enabled:
+            continue
+        try:
+            info = addon_utils.module_bl_info(mod)
+        except Exception:
+            info = getattr(mod, "bl_info", {}) or {}
+        path = os.path.normpath(getattr(mod, "__file__", "") or "")
+        ver = info.get("version") or ()
+        out[name] = {
+            "module": name,
+            "name": info.get("name") or name.split(".")[-1],
+            "version": ".".join(str(v) for v in ver) if isinstance(ver, (tuple, list)) else str(ver),
+            "bundled": bool(system_scripts and path.startswith(system_scripts)),
+        }
+    for name in enabled:          # enabled but not found by addon_utils (rare)
+        out.setdefault(name, {"module": name, "name": name.split(".")[-1], "version": "", "bundled": False})
+    return out
+
+
+HANDLER_LISTS = ("render_init", "render_pre", "render_post", "render_complete", "frame_change_pre",
+                 "frame_change_post", "depsgraph_update_pre", "depsgraph_update_post", "load_post")
+
+
+def used_addons(addons):
+    """Which enabled add-ons does this file appear to rely on when rendering?
+    Signs: the add-on hooks into rendering / frame changes, or the file contains its node groups,
+    custom nodes or custom properties. Returns {module: reason}."""
+    used = {}
+    mods = sorted(addons.keys(), key=len, reverse=True)
+
+    def owner(module_name):
+        for m in mods:
+            if module_name == m or module_name.startswith(m + "."):
+                return m
+        return None
+
+    for hname in HANDLER_LISTS:
+        for fn in getattr(bpy.app.handlers, hname, []):
+            m = owner(getattr(fn, "__module__", "") or "")
+            if m and not m.startswith("bbr"):
+                used.setdefault(m, "hooks into rendering (%s)" % hname)
+
+    tokens = {}
+    for m, a in addons.items():
+        for t in {_norm(m.split(".")[-1]), _norm(a.get("name"))}:
+            if len(t) >= 4:
+                tokens[t] = m
+    names = []
+    for ng in bpy.data.node_groups:
+        names.append(("node group", ng.name))
+        for n in ng.nodes:
+            names.append(("node", n.bl_idname))
+    for coll in (bpy.data.materials, bpy.data.worlds, bpy.data.scenes):
+        for idb in coll:
+            tree = getattr(idb, "node_tree", None) or getattr(idb, "compositing_node_group", None)
+            if tree:
+                for n in tree.nodes:
+                    names.append(("node", n.bl_idname))
+    for coll in (bpy.data.scenes, bpy.data.objects, bpy.data.cameras, bpy.data.materials, bpy.data.worlds,
+                 bpy.data.lights, bpy.data.meshes):
+        for idb in coll:
+            try:
+                for k in idb.keys():
+                    names.append(("property", k))
+            except Exception:
+                pass
+    for kind, n in names:
+        nn = _norm(n)
+        for t, m in tokens.items():
+            if t in nn:
+                used.setdefault(m, "the file contains its %s '%s'" % (kind, n))
+    return used

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QSplitter, QTabWidget, QToo
                                QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QLabel, QProgressBar,
                                QPlainTextEdit, QToolBar, QFileDialog, QMessageBox, QHeaderView,
                                QAbstractItemView, QPushButton, QCheckBox, QMenu, QListWidget,
-                               QListWidgetItem, QStatusBar, QSizePolicy)
+                               QListWidgetItem, QStatusBar, QSizePolicy, QStackedWidget, QComboBox)
 
 from .. import APP_NAME, __version__
 from ..blendfile import version_str
@@ -28,6 +28,8 @@ from .api_bridge import QtExecutor
 from .dialogs import SettingsDialog, AddJobsDialog, FolderDialog
 from .queue_tree import QueueTree
 from .widgets import JobSettingsForm, Thumbnail, LineChart
+from .machines_view import MachinesPanel, job_machines_text
+from .worker_view import WorkerView
 
 STATUS_COLORS = {RENDERING: "#3d8bfd", DONE: "#2fa84f", DONE_ERRORS: "#d39e00", FAILED: "#dc3545",
                  CANCELLED: "#888888", STOPPED: "#e67e22", ON_HOLD: "#c678dd"}
@@ -82,6 +84,9 @@ class MainWindow(QMainWindow):
         self.selected_gid: Optional[str] = None    # selected queue folder
         self._quit_when_idle = False
         self._tree_sig = None
+        self._worker_console: list = []
+        self._worker_last = 0.0
+        self._machines_last = 0.0
 
         self._build_actions()
         self._build_ui()
@@ -99,6 +104,7 @@ class MainWindow(QMainWindow):
             self._add_message("warn", w)
         self._start_api()
         self._update_title()
+        self._apply_mode(initial=True)
         if first_run:
             QTimer.singleShot(300, self._first_run)
 
@@ -178,6 +184,27 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction(self.a_settings)
         self.addToolBar(tb)
+        self.tb_queue = tb
+        mt = QToolBar("Mode")
+        mt.setMovable(False)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        mt.addWidget(spacer)
+        mt.addWidget(QLabel("Mode: "))
+        self.mode_box = QComboBox()
+        self.mode_box.addItem("Coordinator – keeps the queue", "coordinator")
+        self.mode_box.addItem("Worker – renders for another computer", "worker")
+        self.mode_box.setToolTip("Coordinator: this computer has the queue and can share frames with workers.\n"
+                                 "Worker: this computer renders frames for a coordinator on the home network.\n"
+                                 "Locked while something is rendering.")
+        self.mode_box.setCurrentIndex(1 if self.settings.mode == "worker" else 0)
+        self.mode_box.currentIndexChanged.connect(self._mode_changed)
+        mt.addWidget(self.mode_box)
+        mt.addSeparator()
+        self.tb_settings = mt.addAction("Settings…", self.open_settings)
+        self.tb_settings.setVisible(False)
+        self.addToolBar(mt)
+        self.tb_mode = mt
 
         mb = self.menuBar()
         fm = mb.addMenu("File")
@@ -193,6 +220,7 @@ class MainWindow(QMainWindow):
         for a in (self.a_start, self.a_stop_after, self.a_stop_now, self.a_cancel, None, self.a_up, self.a_down,
                   self.a_remove):
             qm.addSeparator() if a is None else qm.addAction(a)
+        self.queue_menu = qm
         mb.addMenu(self.job_menu)
         hm = mb.addMenu("Help")
         for a in (self.a_status_page, None, self.a_shortcuts, self.a_docs):
@@ -245,6 +273,9 @@ class MainWindow(QMainWindow):
         self.issues = QPlainTextEdit()
         self.issues.setReadOnly(True)
         self.tabs.addTab(self.issues, "Issues && history")
+        self.machines_panel = MachinesPanel(self.runner, self.settings, self.api)
+        self.machines_panel.settings_changed.connect(self._start_api)
+        self.tabs.addTab(self.machines_panel, "Machines")
         hsplit.addWidget(self.tabs)
         hsplit.setStretchFactor(0, 2)
         hsplit.setStretchFactor(1, 3)
@@ -282,7 +313,11 @@ class MainWindow(QMainWindow):
         vsplit.setStretchFactor(0, 3)
         vsplit.setStretchFactor(1, 2)
         outer.addWidget(vsplit, 1)
-        self.setCentralWidget(central)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(central)
+        self.worker_view = WorkerView(self.settings, lambda k, p: self.bridge.event.emit(k, p))
+        self.stack.addWidget(self.worker_view)
+        self.setCentralWidget(self.stack)
         self.setStatusBar(QStatusBar())
 
     def _build_live_tab(self):
@@ -315,7 +350,7 @@ class MainWindow(QMainWindow):
         f2.addWidget(self.job_bar, 0, 0, 1, 2)
         self.job_labels = {}
         keys = ["Frames", "Average frame", "Time remaining", "Finishes at", "Disk used / projected",
-                "Render time so far", "Blender runs", "Blender", "Engine / device"]
+                "Render time so far", "Blender runs", "Blender", "Engine / device", "Machines"]
         for r, k in enumerate(keys, start=1):
             f2.addWidget(QLabel(k), r, 0)
             v = QLabel("–")
@@ -589,6 +624,7 @@ class MainWindow(QMainWindow):
         self.a_folder.setEnabled(bool(j))
         self.a_play.setEnabled(bool(j) and bool(j.preview_path) and os.path.exists(j.preview_path or ""))
         self.a_report.setEnabled(bool(j) and (j.data_dir / "report.xlsx").exists())
+        self._update_mode_lock()
         self.a_new_queue.setEnabled(not running)
         self.a_open_queue.setEnabled(not running)
         self.recent_menu.setEnabled(not running)
@@ -600,6 +636,13 @@ class MainWindow(QMainWindow):
     # live panel
     # ======================================================================
     def _tick(self):
+        if self.settings.mode == "worker":
+            self.worker_view.refresh()
+            self._update_mode_lock()
+            return
+        if self.tabs.currentWidget() is self.machines_panel:
+            self.machines_panel.refresh()
+        self._update_mode_lock()
         self._refresh_table()
         self._refresh_live()
         self._refresh_batch()
@@ -629,6 +672,12 @@ class MainWindow(QMainWindow):
             if unknown:
                 t += f" + {unknown} job(s) not started yet (no estimate)"
             parts.append(t)
+        if self.settings.share_with_workers:
+            pub = self.runner.scheduler.machines_public()
+            n_r = sum(1 for m in pub["machines"] if m["kind"] == "remote" and m["online"] and m["state"] == "rendering")
+            n_on = sum(1 for m in pub["machines"] if m["kind"] == "remote" and m["online"])
+            if n_on:
+                parts.append(f"{n_on} worker(s) online" + (f", {n_r} rendering" if n_r else ""))
         if self.runner._keep.active:
             parts.append("keeping the computer awake")
         if self._quit_when_idle:
@@ -699,6 +748,15 @@ class MainWindow(QMainWindow):
                                + (f", {si.get('samples')} samples" if si.get("samples") else "")
                                + (f", {si.get('res_x')}×{si.get('res_y')} @{si.get('res_pct')}%" if si else ""),
         }
+        vals["Machines"] = job_machines_text(self.runner.scheduler, j) or "this computer"
+        pkg = j.package or {}
+        if self.settings.share_with_workers:
+            if pkg.get("error"):
+                vals["Machines"] += f"\n(not shared: {pkg['error']})"
+            elif pkg.get("hash"):
+                need = pkg.get("addons_required") or []
+                vals["Machines"] += (f"\nshared copy {fmt_bytes(pkg.get('size'))}, Blender {pkg.get('blender')}"
+                                     + (f", needs {', '.join(need)}" if need else ""))
         for k, v in vals.items():
             self.job_labels[k].setText(v)
 
@@ -761,6 +819,11 @@ class MainWindow(QMainWindow):
         self._console_shown = target
 
     def _flush_console(self):
+        if self._worker_console:
+            lines, self._worker_console = self._worker_console, []
+            self.worker_view.append_console(lines)
+        if self.settings.mode == "worker":
+            return
         if getattr(self, "_console_shown", None) != self._console_target():
             self._reload_console()
             self.pending_console.clear()
@@ -788,6 +851,29 @@ class MainWindow(QMainWindow):
     # ======================================================================
     def _on_event(self, kind: str, p: dict):
         jid = p.get("job_id")
+        if self.settings.mode == "worker" and kind == "console":
+            self._worker_console.append(p["text"])
+            return
+        if kind in ("worker", "worker_live"):
+            if kind == "worker" or time.time() - self._worker_last > 0.3:
+                self._worker_last = time.time()
+                self.worker_view.refresh()
+                self._update_mode_lock()
+            return
+        if kind == "worker_found":
+            self.worker_view.found(p["found"])
+            return
+        if kind == "worker_paired":
+            self.worker_view.paired(p)
+            return
+        if kind == "worker_addons":
+            self.worker_view.addons_done()
+            return
+        if kind == "machines":
+            if self.tabs.currentWidget() is self.machines_panel and time.time() - self._machines_last > 0.5:
+                self._machines_last = time.time()
+                self.machines_panel.refresh()
+            return
         if kind == "console":
             buf = self.console_buf.setdefault(jid, collections.deque(maxlen=self.settings.console_lines))
             buf.append(p["text"])
@@ -1017,6 +1103,10 @@ class MainWindow(QMainWindow):
             self._update_actions()
             if dlg.api_changed:
                 self._start_api()
+            self.machines_panel.refresh()
+            if self.worker_view.worker:
+                self.worker_view.worker.installs_info = []
+                self.worker_view.worker.registered = False
 
     # ======================================================================
     # queue files
@@ -1165,11 +1255,64 @@ class MainWindow(QMainWindow):
             self.api.stop()
             return
         if self.api.start():
-            where = "this Mac and your home network" if self.settings.api_allow_lan else "this computer"
+            lan = self.settings.api_allow_lan or (self.settings.share_with_workers and self.settings.mode == "coordinator")
+            where = "this computer and your home network" if lan else "this computer"
             self._add_message("info", f"Status page and API running on {where}: {self.api.url}")
         else:
             self._add_message("warn", f"Status page / API could not start: {self.api.error}. "
                                       "Choose another port in Settings.")
+
+    # ======================================================================
+    # coordinator / worker mode
+    # ======================================================================
+    def _update_mode_lock(self):
+        busy = self.runner.running or self.worker_view.busy
+        self.mode_box.setEnabled(not busy)
+        self.mode_box.setToolTip("Locked while something is rendering." if busy else
+                                 "Coordinator: keeps the queue, can share frames with workers.\n"
+                                 "Worker: renders frames for a coordinator on the home network.")
+
+    def _mode_changed(self, _i):
+        mode = self.mode_box.currentData()
+        if mode == self.settings.mode:
+            return
+        if self.runner.running or self.worker_view.busy:
+            self.mode_box.blockSignals(True)
+            self.mode_box.setCurrentIndex(1 if self.settings.mode == "worker" else 0)
+            self.mode_box.blockSignals(False)
+            return
+        if mode == "worker" and not self.settings.installs:
+            QMessageBox.information(self, APP_NAME, "Add a Blender install first (Settings → Blender).")
+            self.mode_box.blockSignals(True)
+            self.mode_box.setCurrentIndex(0)
+            self.mode_box.blockSignals(False)
+            return
+        self.settings.mode = mode
+        self.settings.save()
+        self._apply_mode()
+        self._start_api()       # a worker does not offer jobs on the network
+
+    def _apply_mode(self, initial: bool = False):
+        worker = self.settings.mode == "worker"
+        self.stack.setCurrentIndex(1 if worker else 0)
+        for a in self.tb_queue.actions():
+            a.setVisible(not worker)
+        self.tb_queue.setVisible(not worker)
+        self.tb_settings.setVisible(worker)
+        self.queue_menu.menuAction().setVisible(not worker)
+        self.job_menu.menuAction().setVisible(not worker)
+        for a in (self.a_start, self.a_stop_after, self.a_stop_now, self.a_cancel, self.a_add, self.a_new_queue,
+                  self.a_open_queue, self.a_save, self.a_save_as, self.a_new_folder):
+            if worker:
+                a.setEnabled(False)
+        if worker:
+            self.worker_view.start(lambda k, p: self.bridge.event.emit(k, p))
+            self.setWindowTitle(f"{APP_NAME} – Worker")
+        else:
+            if not initial:
+                self.worker_view.stop(now=True)
+            self._update_actions()
+            self._update_title()
 
     def _after_api_change(self):
         self._refresh_table(full=True)
@@ -1227,6 +1370,13 @@ class MainWindow(QMainWindow):
         if j and (j.data_dir / "report.xlsx").exists():
             self._open_path_file(j.data_dir / "report.xlsx")
 
+    def _quit_when_worker_idle(self):
+        if self.worker_view.busy:
+            QTimer.singleShot(1000, self._quit_when_worker_idle)
+            return
+        self._quit_when_idle = False
+        self.close()
+
     def _open_path_file(self, p):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
 
@@ -1268,6 +1418,35 @@ class MainWindow(QMainWindow):
         self.add_files([u.toLocalFile() for u in e.mimeData().urls()])
 
     def closeEvent(self, e):
+        if self.settings.mode == "worker":
+            if self.worker_view.busy:
+                box = QMessageBox(self)
+                box.setWindowTitle("Rendering")
+                box.setText("This computer is rendering a frame for the coordinator.")
+                box.setInformativeText("If you stop now, the coordinator gives the frame to another machine "
+                                       "(or renders it when this one is back).")
+                now = box.addButton("Stop now and quit", QMessageBox.ButtonRole.DestructiveRole)
+                after = box.addButton("Finish this frame, then quit", QMessageBox.ButtonRole.AcceptRole)
+                box.addButton("Keep rendering", QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                c = box.clickedButton()
+                if c is now:
+                    self.worker_view.stop(now=True)
+                elif c is after:
+                    self.worker_view.worker.set_accepting(False)
+                    self._quit_when_idle = True
+                    self._add_message("info", "Will quit after the current frame")
+                    QTimer.singleShot(1000, self._quit_when_worker_idle)
+                    e.ignore()
+                    return
+                else:
+                    e.ignore()
+                    return
+            else:
+                self.worker_view.stop(now=True)
+            self.api.stop()
+            e.accept()
+            return
         if not self.runner.running:
             self.api.stop()
             e.accept()

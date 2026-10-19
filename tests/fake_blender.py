@@ -13,6 +13,11 @@ Behaviour switches (environment variables):
   FAKE_VIDEO=1            scene output set to FFMPEG
   FAKE_NEW_LOG=1          behave like Blender 5.x (no Fra: status lines)
   FAKE_DISK_FULL=4        saving this frame fails with "No space left on device"
+  FAKE_ADDONS=lens_sim:LensSim:1.2.0;other:Other:1.0   enabled add-ons (module:name:version)
+  FAKE_NODE_GROUPS=LensSim Lens   node groups in the file (add-on detection)
+  FAKE_LIBTREE={"main": ["//libs/a.blend"], "/abs/a.blend": ["//b.blend"]}   linked libraries
+  FAKE_IMAGES=/abs/tex.png;//rel.png   external images of the main file
+  FAKE_VERSION=4.2.3      version string
 """
 import os
 import struct
@@ -23,7 +28,7 @@ import zlib
 
 argv = sys.argv[1:]
 if "--version" in argv:
-    print("Blender 4.2.3 LTS\n\tbuild date: 2024-10-14")
+    print("Blender %s\n\tbuild date: 2024-10-14" % os.environ.get("FAKE_VERSION", "4.2.3 LTS"))
     sys.exit(0)
 
 env = os.environ
@@ -123,7 +128,7 @@ def op_render(write_still=False, animation=False):
     return {"FINISHED"}
 
 
-class Images(dict):
+class Images(list):
     def get(self, k, d=None):
         if k == "Render Result" and state["result"]:
             def save(path, scene=None):
@@ -134,12 +139,75 @@ class Images(dict):
         return d
 
 
+import json  # noqa: E402
+
+scene.keys = lambda: []
+current = {"file": os.path.abspath(argv[argv.index("-b") + 1]) if "-b" in argv and
+           not argv[argv.index("-b") + 1].startswith("-") else ""}
+
+
+def abspath(p, library=None):
+    if p.startswith("//"):
+        base = os.path.dirname(abspath(library.filepath) if library is not None else current["file"])
+        return os.path.normpath(os.path.join(base, p[2:]))
+    return p
+
+
+def make_image(path):
+    img = NS(name=os.path.basename(path), filepath=path, library=None, packed_file=None, source="FILE")
+    img.pack = lambda: setattr(img, "packed_file", True)
+    return img
+
+
+libtree = json.loads(env.get("FAKE_LIBTREE") or "{}")
+
+
+def load_data(path, is_main):
+    key = "main" if is_main else os.path.normpath(path)
+    libs = [NS(filepath=p, parent=None) for p in libtree.get(key, [])]
+    imgs = Images(make_image(p) for p in (env.get("FAKE_IMAGES", "").split(";") if is_main else []) if p)
+    groups = [NS(name=n, nodes=[]) for n in env.get("FAKE_NODE_GROUPS", "").split(",") if n and is_main]
+    bpy.data = NS(images=imgs, libraries=libs, sounds=[], movieclips=[], fonts=[], volumes=[], cache_files=[],
+                  node_groups=groups, materials=[], worlds=[], scenes=[scene], objects=[], cameras=[], lights=[],
+                  meshes=[])
+
+
+def save_as_mainfile(filepath, copy=False, relative_remap=True, compress=False):
+    with open(filepath, "w") as f:
+        json.dump({"from": current["file"], "libraries": [l.filepath for l in bpy.data.libraries],
+                   "images": [[i.filepath, bool(i.packed_file)] for i in bpy.data.images]}, f)
+    return {"FINISHED"}
+
+
+def open_mainfile(filepath, load_ui=False):
+    if not os.path.exists(filepath):
+        raise RuntimeError("Cannot read file '%s'" % filepath)
+    current["file"] = os.path.abspath(filepath)
+    load_data(filepath, False)
+    return {"FINISHED"}
+
+
+addon_mods = []
+enabled = {}
+for spec in [x for x in env.get("FAKE_ADDONS", "").split(";") if x]:
+    mod, name, ver = (spec.split(":") + ["", ""])[:3]
+    m = types.ModuleType(mod)
+    m.__file__ = "/home/user/addons/%s/__init__.py" % mod
+    m.bl_info = {"name": name, "version": tuple(int(v) for v in ver.split(".") if v)}
+    addon_mods.append(m)
+    enabled[mod] = NS(preferences=None)
+addon_utils = types.ModuleType("addon_utils")
+addon_utils.modules = lambda refresh=False: list(addon_mods)
+addon_utils.module_bl_info = lambda m: m.bl_info
+sys.modules["addon_utils"] = addon_utils
+
 bpy = types.ModuleType("bpy")
-bpy.context = NS(scene=scene, preferences=NS(addons={}))
-bpy.app = NS(version_string="4.2.3 LTS", handlers=handlers)
-bpy.data = NS(images=Images(), libraries=[], sounds=[], movieclips=[], fonts=[], volumes=[], cache_files=[])
-bpy.ops = NS(render=NS(render=op_render))
-bpy.path = NS(abspath=lambda p, library=None: p)
+bpy.context = NS(scene=scene, preferences=NS(addons=enabled))
+bpy.app = NS(version_string=env.get("FAKE_VERSION", "4.2.3 LTS"), handlers=handlers)
+bpy.ops = NS(render=NS(render=op_render), wm=NS(save_as_mainfile=save_as_mainfile, open_mainfile=open_mainfile))
+bpy.path = NS(abspath=abspath)
+bpy.utils = NS(system_resource=lambda kind: "/fake/blender/scripts")
+load_data(current["file"], True)
 sys.modules["bpy"] = bpy
 
 script = argv[argv.index("--python") + 1]

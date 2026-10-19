@@ -67,11 +67,36 @@ def main():
     todo = [f for f in frames if f not in skip]
     C.out("PLAN", {"total": len(frames), "todo": len(todo)})
     max_frames = int(args.get("max_frames") or 0)   # restart Blender every N frames
+    dynamic = bool(args.get("dynamic"))
+    extra_dirs = [os.path.join(frames_dir, C.safe_dir_name(n)) for n in redirected]
 
-    for i, f in enumerate(todo):
-        if max_frames and i >= max_frames:
-            C.out("CHUNK_DONE", {"rendered": i})
+    state = {"rendered": 0, "chunk": False}
+
+    def chunk_full():
+        if max_frames and state["rendered"] >= max_frames:
+            state["chunk"] = True
+            return True
+        return False
+
+    def next_frames():
+        """Static list, or (dynamic) ask the batch renderer for each next frame over stdin."""
+        if not dynamic:
+            for f in todo:
+                if chunk_full():
+                    return
+                yield f
             return
+        while not chunk_full():
+            C.out("NEED_FRAME", {})
+            line = sys.stdin.readline()
+            if not line:
+                return
+            parts = line.split()
+            if not parts or parts[0] != "FRAME":
+                return                      # "DONE" or anything else: stop
+            yield int(parts[1])
+
+    for f in next_frames():
         C.out("FRAME_START", {"frame": f})
         last["stats"] = ""
         last["peak"] = None
@@ -93,6 +118,17 @@ def main():
             C.out("FRAME_ERROR", {"frame": f, "error": traceback.format_exc()})
             sys.exit(3)
         t2 = time.time()
+        extra = []
+        for d in extra_dirs:      # files written by compositor File Output nodes for this frame
+            for root, _dirs, files in os.walk(d):
+                for fn in files:
+                    p = os.path.join(root, fn)
+                    try:
+                        if os.path.getmtime(p) >= t0 - 1:
+                            extra.append(os.path.relpath(p, frames_dir))
+                    except OSError:
+                        pass
+        state["rendered"] += 1
         C.out("FRAME_DONE", {
             "frame": f,
             "render_s": round(t1 - t0, 3),
@@ -102,9 +138,13 @@ def main():
             "peak_mb": last["peak"],
             "samples": info.get("samples"),
             "stats": last["stats"],
+            "extra": extra,
         })
 
-    C.out("ALL_DONE", {"rendered": len(todo)})
+    if state["chunk"]:
+        C.out("CHUNK_DONE", {"rendered": state["rendered"]})
+        return
+    C.out("ALL_DONE", {"rendered": state["rendered"]})
 
 
 try:

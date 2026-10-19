@@ -90,7 +90,26 @@ class Controller:
                       "eta_s": known if (known or not unknown) else None, "jobs_without_estimate": unknown,
                       "finishes_at": (time.time() + known) if known else None},
             "queue_file": qf,
+            "mode": self.settings.mode,
+            "machines": self.machines() if self.settings.share_with_workers else None,
         }
+
+    def machines(self) -> dict:
+        return self.runner.scheduler.machines_public()
+
+    def set_machine_enabled(self, mid: str, enabled: bool) -> dict:
+        if mid not in self.runner.scheduler.machines:
+            raise ApiError(404, f"no machine with id {mid}")
+        self.runner.scheduler.set_enabled(mid, enabled)
+        self._changed()
+        return self.machines()
+
+    def forget_machine(self, mid: str) -> dict:
+        if mid == "local":
+            raise ApiError(400, "this computer cannot be removed")
+        self.runner.scheduler.forget(mid)
+        self._changed()
+        return self.machines()
 
     def queue_list(self) -> dict:
         return {
@@ -113,7 +132,8 @@ class Controller:
                                if r.get("status") in (F_FAILED, F_PENDING)],
             "attempts": [{k: a.get(k) for k in ("n", "started", "ended", "exit_code", "reason",
                                                 "frames_rendered", "blender")} for a in j.attempts],
-            "frame_times": [{"frame": r["frame"], "render_s": r.get("render_s"),
+            "by_machine": self.runner.scheduler.job_machine_stats(j),
+            "frame_times": [{"frame": r["frame"], "render_s": r.get("render_s"), "machine": r.get("machine"),
                              "blender_peak_mb": r.get("blender_peak_mb"),
                              "process_peak_mb": r.get("process_peak_mb")} for r in j.done_records()],
         })
@@ -188,6 +208,8 @@ class Controller:
     def _not_rendering(self, j: Job):
         if self.runner.running and self.runner.current is j:
             raise ApiError(409, "this job is rendering – stop it first")
+        if self.runner.scheduler.outstanding(j.id):
+            raise ApiError(409, "other machines are rendering this job – stop the batch first")
 
     def retry(self, job_id: str) -> dict:
         j = self._job(job_id)

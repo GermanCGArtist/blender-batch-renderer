@@ -90,8 +90,44 @@ While the app runs, it serves a **status page** that works in any browser: *Help
 | `POST /api/v1/batch/start` · `/batch/stop` `{"mode": "after_frame"\|"now"}` · `/batch/cancel-job` | control the batch |
 | `POST /api/v1/jobs/<id>/retry` · `/reset` · `/preview` · `/enabled` `{"enabled": false}` | job actions |
 | `DELETE /api/v1/jobs/<id>` | remove a job from the queue (files stay) |
+| `GET /api/v1/machines` · `POST /api/v1/machines/<id>/enabled` · `DELETE /api/v1/machines/<id>` | computers taking part, with per-machine and combined statistics |
 
 Example from a terminal: `curl -X POST -H "X-BBR-Request: 1" -d '{"blend": "/Users/me/shot.blend"}' http://127.0.0.1:8642/api/v1/jobs`
+
+## Rendering on several computers
+
+Several computers can render the frames of one animation together, e.g. a Windows PC with an NVIDIA GPU on LAN and a MacBook on Wi-Fi. One computer is the **coordinator**: it has the queue, and all frames, reports and previews end up in its job folders. The others run the app in **worker** mode. No shared folder is needed; the app transfers everything itself.
+
+**Setup:**
+1. On every computer, install the app, the Blender version(s) your files need, and the add-ons your scenes use (e.g. LensSim). Add-ons are not copied between machines.
+2. On the coordinator, open the **Machines** tab and tick *Share jobs with worker computers*. It shows a 6-digit pairing code. Allow incoming connections when the firewall asks.
+3. On each worker, switch **Mode** (top right) to **Worker**, press *Find on network* (or type the coordinator's address), enter the code and press *Pair*. You only do this once.
+4. Press **Start** on the coordinator.
+
+**How it works:**
+- **Job copy.** Before workers render a job, the coordinator makes a self-contained copy of it, once per version of the .blend:
+  - textures packed;
+  - every linked library, including libraries linked by libraries;
+  - external caches and sequences.
+  
+  Each worker downloads the copy once and keeps it in a cache (*keep up to … GB*). An interrupted download resumes.
+- **Frames.** Workers render one frame at a time and keep Blender open in between, so faster machines simply do more frames. Each finished frame is uploaded right away, and the worker deletes its copy once the coordinator has confirmed it.
+- **Who gets frames.** Frames only go to workers with the same Blender version (major.minor) and the add-ons the file uses. Add-ons are detected from node groups, custom properties and render handlers. The Machines tab says why a worker is idle.
+- **Engines.** Cycles, EEVEE and Workbench work. Cycles uses each machine's own GPU settings (OptiX/CUDA, Metal).
+- **Stop after frame:** every machine delivers its current frame first. **Stop now** and **Cancel job:** every machine drops its frame, and nothing counts as failed.
+- **A worker vanishes** (sleep, Wi-Fi drop): after 45 s without a heartbeat, its frame goes back to the pool. **A worker crashes on a frame:** the failed attempt is counted against that machine, and the frame is preferably given to another one.
+- **Locked while rendering:** the mode switch, sharing and the worker's settings. On a worker, use *Pause after this frame* or *Stop now* instead.
+
+**Statistics:** the **Machines** tab shows, per machine:
+- state, current frame with samples and remaining time;
+- device, Blender versions and add-ons;
+- frames, average frame time and failures this batch, plus all-time totals.
+
+Above the table are the combined figures and the speed of all machines together (frames per hour). The **Live** tab shows frames per machine for the selected job. `frames.csv` has a *machine* column, and `report.xlsx` has a **Machines** sheet with charts. The worker window shows its own session, all-time and per-job statistics. The status page has a Machines section too.
+
+Command line worker: `python -m bbr worker --code 123456` (finds the coordinator by itself) or `python -m bbr worker --server 192.168.1.20`.
+
+Not yet included in the job copy: simulation/fluid caches on disk (bake them into the file, or render those jobs on the coordinator). Third-party render engines aren't supported for sharing yet.
 
 ## Blender add-on: "Send to Batch Renderer"
 
@@ -137,6 +173,14 @@ The queue itself lives in `~/Library/Application Support/BlenderBatchRenderer/` 
 ## Tests
 
 `python3 tests/test_engine.py` runs the engine against a simulated Blender (`tests/fake_blender.py`). The tests cover crashes, retries, stop/resume, quitting mid-render, broken files, video→PNG switching, overrides, Blender 5-style output, Blender restarts every N frames, a full disk, changed and missing .blend files, moved render folders, folders and the single-instance lock.
+
+`python3 tests/test_distributed.py` simulates a coordinator with several workers. It covers:
+- job copies with nested linked libraries and add-on detection;
+- pairing and access checks, and network discovery;
+- fast and slow workers, and a worker with a missing add-on;
+- crashing workers and a worker that disappears;
+- stop now and stop after frame;
+- the coordinator rendering together with a worker.
 
 `python3 tests/test_api.py` tests the API, queue files, the default render folder and the Blender add-on (with a stand-in for Blender's Python module).
 

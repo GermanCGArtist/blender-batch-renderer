@@ -33,6 +33,8 @@ class BlenderProcess:
         self.rss_peak_total_mb: Optional[float] = None
         self._stop_watch = threading.Event()
         self.watch_hook: Optional[Callable[[], None]] = None   # called every second
+        self.interactive = False      # True: we talk to the script through stdin (next-frame protocol)
+        self._send_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     def run(self) -> int:
@@ -46,8 +48,8 @@ class BlenderProcess:
             log.write(f"# command: {' '.join(self.cmd)}\n# started: {time.ctime()}\n")
             log.flush()
             self.proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                         stdin=subprocess.DEVNULL, env=self.env, cwd=self.cwd,
-                                         bufsize=0, **kwargs)
+                                         stdin=subprocess.PIPE if self.interactive else subprocess.DEVNULL,
+                                         env=self.env, cwd=self.cwd, bufsize=0, **kwargs)
             watcher = threading.Thread(target=self._watch, daemon=True)
             watcher.start()
             buf = ""
@@ -78,6 +80,19 @@ class BlenderProcess:
             self._stop_watch.set()
             log.write(f"# exit code: {rc}  kill reason: {self.kill_reason}\n# ended: {time.ctime()}\n")
         return rc
+
+    def send(self, line: str) -> bool:
+        """Write one line to the script's stdin. False if Blender is gone."""
+        p = self.proc
+        if not p or not p.stdin or p.poll() is not None:
+            return False
+        try:
+            with self._send_lock:
+                p.stdin.write((line.rstrip("\n") + "\n").encode("utf-8"))
+                p.stdin.flush()
+            return True
+        except (OSError, ValueError):
+            return False
 
     def kill(self, reason: str, grace: float = 5.0) -> None:
         """Terminate the process (and its children). Safe to call from any thread."""

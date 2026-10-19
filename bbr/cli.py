@@ -32,12 +32,16 @@ def main(argv=None):
     a.add_argument("--folder", default="", help="queue folder name (created if missing)")
     sub.add_parser("list")
     sub.add_parser("run")
+    wk = sub.add_parser("worker", help="render frames for a coordinator on the home network")
+    wk.add_argument("--server", default="", help="coordinator address, e.g. 192.168.1.20 (found automatically if left out)")
+    wk.add_argument("--code", default="", help="pairing code shown on the coordinator (first time only)")
+    wk.add_argument("--name", default="", help="name shown on the coordinator")
     sc = sub.add_parser("scan")
     sc.add_argument("extra", nargs="*", help="extra install paths")
     args = ap.parse_args(argv)
 
     settings = AppSettings.load()
-    if args.cmd in ("add", "run"):
+    if args.cmd in ("add", "run", "worker"):
         from .storage import InstanceLock
         lock = InstanceLock()
         if not lock.acquire():
@@ -82,6 +86,8 @@ def main(argv=None):
             skip = "" if q.is_active(j) else " (skipped)"
             print(f"{name:40s} {j.status + skip:30s} {j.count('done')}/{j.total_frames or '?'}  {j.folder}")
         return 0
+    if args.cmd == "worker":
+        return _worker_cli(settings, args)
     if args.cmd == "run":
         from .runner import Runner
 
@@ -112,6 +118,62 @@ def main(argv=None):
         if api:
             api.stop()
         return 0
+
+
+def _worker_cli(settings, args) -> int:
+    import time
+    from .worker import Worker, pair, normalize_server, CoordinatorError
+    from .workerapi import discover
+    if not settings.installs:
+        print("No Blender installs configured – run:  bbr scan")
+        return 1
+    if args.name:
+        settings.worker_name = args.name
+    server = normalize_server(args.server) if args.server else settings.worker_server
+    if not server:
+        found = discover()
+        if not found:
+            print("No coordinator found on the network. Pass --server <address>.")
+            return 1
+        server = found[0]["url"]
+        print(f"found coordinator {found[0]['name']} at {server}")
+    if server != settings.worker_server or args.code:
+        if not args.code:
+            print(f"Not paired with {server} yet. Pass --code <pairing code> (shown on the coordinator).")
+            return 1
+        try:
+            d = pair(server, args.code, settings.worker_id, settings.worker_name or "")
+        except CoordinatorError as e:
+            print(f"pairing failed: {e.message}")
+            return 1
+        settings.worker_server, settings.worker_key = server, d["key"]
+        print(f"paired with {d.get('coordinator')}")
+    settings.mode = "worker"
+    settings.save()
+
+    def emit(kind, p):
+        if kind == "message":
+            print(f"[{p['level']}] {p['text']}")
+
+    w = Worker(settings, emit)
+    w.accepting = True
+    signal.signal(signal.SIGINT, lambda *a: w.stop_now())
+    w.start()
+    last = ""
+    try:
+        while w.running:
+            line = f"{w.state}: {w.note}"
+            if line != last:
+                print(line)
+                last = line
+            if w.state == "paused" and not w.accepting:
+                break
+            time.sleep(0.5)
+    finally:
+        w.stop(now=True)
+        s = w.session
+        print(f"session: {s['frames']} frames, {s['failed']} failed, {fmt_duration(s['render_s'])} rendering")
+    return 0
 
 
 if __name__ == "__main__":

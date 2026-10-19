@@ -25,6 +25,10 @@ API (all JSON; v1)
   POST   /api/v1/jobs/<id>/enabled         {"enabled": true|false}
   DELETE /api/v1/jobs/<id>                 remove from the queue (files stay)
   POST   /api/v1/queue/open                {"path": "/path/x.bbrqueue"}  (window only)
+  GET    /api/v1/machines                  computers taking part (per machine + combined statistics)
+  POST   /api/v1/machines/<id>/enabled     {"enabled": true|false}
+  DELETE /api/v1/machines/<id>             forget a worker
+  /api/v1/worker/...                       used by worker machines, see workerapi.py
   GET    /                                 status page for a browser
 """
 from __future__ import annotations
@@ -40,6 +44,7 @@ from typing import Callable, Optional
 from urllib.parse import urlparse, parse_qs
 
 from .control import ApiError, Controller
+from .workerapi import DiscoveryResponder, WorkerEndpoints, WorkerError
 
 ASSETS = Path(__file__).resolve().parent / "assets"
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
@@ -69,6 +74,8 @@ class ApiServer:
         self.httpd: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
         self.error: Optional[str] = None
+        self.workers = WorkerEndpoints(controller.runner, settings)
+        self.discovery = DiscoveryResponder(settings, controller.runner.scheduler.local.name)
 
     @property
     def running(self) -> bool:
@@ -101,7 +108,8 @@ class ApiServer:
         self.error = None
         if not self.settings.api_enabled:
             return False
-        host = "0.0.0.0" if self.settings.api_allow_lan else "127.0.0.1"
+        lan = self.settings.api_allow_lan or (self.settings.share_with_workers and self.settings.mode == "coordinator")
+        host = os.environ.get("BBR_API_HOST") or ("0.0.0.0" if lan else "127.0.0.1")
         handler = _make_handler(self)
         try:
             self.httpd = ThreadingHTTPServer((host, int(self.settings.api_port)), handler)
@@ -112,9 +120,12 @@ class ApiServer:
         self.httpd.daemon_threads = True
         self.thread = threading.Thread(target=self.httpd.serve_forever, name="bbr-api", daemon=True)
         self.thread.start()
+        if self.settings.share_with_workers and self.settings.mode == "coordinator":
+            self.discovery.start()
         return True
 
     def stop(self) -> None:
+        self.discovery.stop()
         if self.httpd:
             try:
                 self.httpd.shutdown()
@@ -144,6 +155,9 @@ def _make_handler(server: ApiServer):
         ("POST", r"/api/v1/jobs/([\w-]+)/preview", lambda m, q, b: ctl.preview(m.group(1))),
         ("POST", r"/api/v1/jobs/([\w-]+)/enabled", lambda m, q, b: ctl.set_enabled(m.group(1), bool(b.get("enabled")))),
         ("DELETE", r"/api/v1/jobs/([\w-]+)", lambda m, q, b: ctl.remove(m.group(1))),
+        ("GET", r"/api/v1/machines", lambda m, q, b: ctl.machines()),
+        ("POST", r"/api/v1/machines/([\w-]+)/enabled", lambda m, q, b: ctl.set_machine_enabled(m.group(1), bool(b.get("enabled")))),
+        ("DELETE", r"/api/v1/machines/([\w-]+)", lambda m, q, b: ctl.forget_machine(m.group(1))),
         ("POST", r"/api/v1/queue/open", lambda m, q, b: ctl.open_queue(str(b.get("path", "")))),
     ]
     compiled = [(meth, re.compile("^" + pat + "/?$"), fn) for meth, pat, fn in routes]
@@ -211,6 +225,8 @@ def _make_handler(server: ApiServer):
             u = urlparse(self.path)
             q = parse_qs(u.query)
             path = u.path
+            if path.startswith("/api/v1/worker/"):
+                return self._worker(method, path, q)
             bad = self._check(q, changing=method in ("POST", "DELETE"))
             if bad:
                 return self._json(bad[0], {"error": bad[1]})
@@ -243,6 +259,33 @@ def _make_handler(server: ApiServer):
                 return self._json(503, {"error": "the app is busy, try again"})
             except Exception as e:      # never take the app down
                 return self._json(500, {"error": f"{type(e).__name__}: {e}"})
+
+        def handle(self):
+            try:
+                super().handle()
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                pass        # the other side went away (sleeping laptop, Wi-Fi drop)
+
+        def _worker(self, method, path, q):
+            self.close_connection = True       # one request per connection keeps this simple and robust
+            try:
+                if not (st.share_with_workers and st.mode == "coordinator"):
+                    raise WorkerError(403, "this computer does not share jobs with other machines right now")
+                return server.workers.handle(self, method, path, q)
+            except (WorkerError, ApiError) as e:
+                self.close_connection = True
+                return self._json(e.status, {"error": e.message})
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+            except Exception as e:
+                self.close_connection = True
+                return self._json(500, {"error": f"{type(e).__name__}: {e}"})
+
+        def do_PUT(self):
+            u = urlparse(self.path)
+            if u.path.startswith("/api/v1/worker/"):
+                return self._worker("PUT", u.path, parse_qs(u.query))
+            self._json(405, {"error": "PUT is only used by workers"})
 
         def do_GET(self):
             self._handle("GET")
