@@ -30,6 +30,7 @@ DONE = "done"
 DONE_ERRORS = "done (with failed frames)"
 FAILED = "failed"            # file could not be loaded/rendered at all
 CANCELLED = "cancelled"
+ON_HOLD = "on hold"          # needs a decision (file changed / missing) - skipped by the batch
 
 RUNNABLE = (QUEUED, STOPPED, RENDERING)
 
@@ -52,6 +53,7 @@ class JobSettings:
     frame_timeout_min: float = 0          # 0 = no timeout
     make_preview: bool = True
     preflight: bool = False
+    restart_every: int = 0                # restart Blender every N frames (0 = never)
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobSettings":
@@ -67,6 +69,7 @@ class AppSettings:
     auto_resume: bool = False
     last_render_root: str = ""
     console_lines: int = 5000
+    min_free_gb: float = 5.0              # stop the batch when the render disk gets this full
 
     @property
     def path(self) -> Path:
@@ -111,6 +114,9 @@ class Job:
     started: Optional[float] = None
     finished: Optional[float] = None
     preview_path: Optional[str] = None
+    group: str = ""                           # queue folder id ("" = top level)
+    enabled: bool = True                      # unchecked jobs are skipped by the batch
+    blend_stamp: Optional[List[float]] = None # [mtime, size] of the .blend when frames were rendered
 
     # ---- folders -------------------------------------------------------
     @property
@@ -170,12 +176,27 @@ class Job:
         ext = (self.scene_info or {}).get("file_extension", ".png")
         return self.frames_dir / frame_filename(self.file_prefix, frame, ext)
 
+    def frame_file(self, frame: int, rec: Optional[dict] = None) -> Path:
+        """Where a finished frame lives. Paths are stored relative to the job folder,
+        so moving or renaming the render folder (or the drive) does not lose frames."""
+        rec = rec if rec is not None else self.frames.get(str(frame), {})
+        rel = rec.get("rel")
+        if rel:
+            return self.folder_p / rel
+        f = rec.get("file")
+        if f:
+            p = Path(f)
+            if p.exists():
+                return p
+            return self.frames_dir / p.name
+        return self.frame_path(frame)
+
     def verify_done_frames(self) -> int:
         """Drop 'done' records whose file vanished or is empty. Returns count dropped."""
         dropped = 0
         for key, rec in list(self.frames.items()):
             if rec.get("status") == F_DONE:
-                p = rec.get("file") or str(self.frame_path(int(key)))
+                p = str(self.frame_file(int(key), rec))
                 try:
                     ok = os.path.getsize(p) > 0
                 except OSError:
@@ -204,8 +225,23 @@ class Job:
         return [f for f in fl if f not in skip]
 
     def done_records(self) -> List[dict]:
-        return [dict(r, frame=int(k)) for k, r in sorted(list(self.frames.items()), key=lambda kv: int(kv[0]))
+        return [dict(r, frame=int(k), path=str(self.frame_file(int(k), r)))
+                for k, r in sorted(list(self.frames.items()), key=lambda kv: int(kv[0]))
                 if r.get("status") == F_DONE]
+
+    # ---- the .blend file -------------------------------------------------
+    def current_blend_stamp(self) -> Optional[List[float]]:
+        try:
+            st = os.stat(self.blend_path)
+        except OSError:
+            return None
+        return [round(st.st_mtime, 3), st.st_size]
+
+    def blend_changed(self) -> bool:
+        """True if the .blend was saved again after frames were rendered from it."""
+        cur = self.current_blend_stamp()
+        return bool(self.blend_stamp and cur and self.count(F_DONE)
+                    and (abs(cur[0] - self.blend_stamp[0]) > 0.01 or cur[1] != self.blend_stamp[1]))
 
     # ---- estimates -----------------------------------------------------
     def avg_frame_seconds(self, last_n: int = 10) -> Optional[float]:

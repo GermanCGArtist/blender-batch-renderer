@@ -56,3 +56,56 @@ def read_json(path: Path | str, default=None):
             return json.load(f)
     except (OSError, ValueError):
         return default
+
+
+class InstanceLock:
+    """Makes sure only one copy of the app works on the queue at a time.
+
+    Uses an OS file lock, which the OS releases automatically if the app
+    crashes - so there is never a stale lock to clean up by hand.
+    """
+
+    def __init__(self, path=None):
+        self.path = Path(path) if path else app_data_dir() / "app.lock"
+        self._f = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(self.path, "a+")
+        try:
+            if sys.platform.startswith("win"):
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            return False
+        f.seek(0)
+        f.truncate()
+        f.write(str(os.getpid()))
+        f.flush()
+        self._f = f
+        return True
+
+    def release(self) -> None:
+        if self._f:
+            try:
+                self._f.close()
+            except OSError:
+                pass
+            self._f = None
+
+
+def free_bytes(path) -> "int | None":
+    """Free space on the drive holding `path` (walks up to an existing folder)."""
+    import shutil
+    p = Path(path)
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    try:
+        return shutil.disk_usage(str(p)).free
+    except OSError:
+        return None

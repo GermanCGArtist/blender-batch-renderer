@@ -7,9 +7,9 @@ from typing import List
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QCursor
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
-                               QPushButton, QDialogButtonBox, QGroupBox, QCheckBox, QSpinBox, QLabel,
+                               QPushButton, QDialogButtonBox, QGroupBox, QCheckBox, QSpinBox, QDoubleSpinBox, QLabel,
                                QFileDialog, QMessageBox, QHeaderView, QAbstractItemView, QFormLayout,
-                               QListWidget, QApplication)
+                               QListWidget, QApplication, QLineEdit, QComboBox)
 
 from ..installs import BlenderInstall, probe, scan
 from ..models import AppSettings, JobSettings
@@ -63,6 +63,14 @@ class SettingsDialog(QDialog):
         f3.addRow(self.keep_awake)
         f3.addRow(self.auto_resume)
         f3.addRow("Console lines kept per job", self.console_lines)
+        self.min_free = QDoubleSpinBox()
+        self.min_free.setRange(0, 100000)
+        self.min_free.setDecimals(1)
+        self.min_free.setSuffix(" GB")
+        self.min_free.setValue(float(settings.min_free_gb))
+        self.min_free.setToolTip("The batch stops (keeping all finished frames) when the render drive has less "
+                                 "free space than this, or less than 3 frames' worth.")
+        f3.addRow("Stop when free disk space is below", self.min_free)
         lay.addWidget(g3)
 
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -121,15 +129,48 @@ class SettingsDialog(QDialog):
         s.installs = [i.to_dict() for i in self.installs]
         d = self.defaults.get_settings()
         s.defaults.update({k: getattr(d, k) for k in ("render_root", "blender", "max_attempts", "retry_delay_s",
-                                                       "frame_timeout_min", "make_preview", "preflight")})
+                                                       "frame_timeout_min", "make_preview", "preflight",
+                                                       "restart_every")})
         s.keep_awake = self.keep_awake.isChecked()
         s.auto_resume = self.auto_resume.isChecked()
         s.console_lines = self.console_lines.value()
+        s.min_free_gb = self.min_free.value()
         s.save()
 
 
+class FolderDialog(QDialog):
+    """Create / edit a queue folder."""
+
+    def __init__(self, name: str = "", render_root: str = "", parent=None, title="New folder"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(560, 160)
+        form = QFormLayout(self)
+        self.name = QLineEdit(name)
+        self.name.setPlaceholderText("e.g. Project X – shots")
+        form.addRow("Name", self.name)
+        self.root = QLineEdit(render_root)
+        self.root.setPlaceholderText("optional: default render folder for files added to this folder")
+        b = QPushButton("Browse…")
+        b.clicked.connect(self._browse)
+        row = QHBoxLayout()
+        row.addWidget(self.root, 1)
+        row.addWidget(b)
+        form.addRow("Render folder", row)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(self, "Render folder", self.root.text())
+        if d:
+            self.root.setText(d)
+
+
 class AddJobsDialog(QDialog):
-    def __init__(self, files: List[str], settings: AppSettings, installs, parent=None):
+    def __init__(self, files: List[str], settings: AppSettings, installs, parent=None,
+                 groups=None, group_id: str = ""):
         super().__init__(parent)
         self.setWindowTitle(f"Add {len(files)} file(s)")
         self.resize(720, 560)
@@ -139,10 +180,22 @@ class AddJobsDialog(QDialog):
         lst.setMaximumHeight(140)
         lay.addWidget(lst)
         self.form = JobSettingsForm(lambda: installs)
-        s = JobSettings.from_dict(settings.defaults)
-        if settings.last_render_root and not s.render_root:
-            s.render_root = settings.last_render_root
-        self.form.set_settings(s)
+        self.groups = groups or []
+        self.folder = QComboBox()
+        self.folder.addItem("— top level —", "")
+        for g in self.groups:
+            self.folder.addItem(g["name"], g["id"])
+        i = self.folder.findData(group_id)
+        self.folder.setCurrentIndex(max(0, i))
+        frow = QFormLayout()
+        frow.addRow("Queue folder", self.folder)
+        lay.addLayout(frow)
+        self._defaults = JobSettings.from_dict(settings.defaults)
+        if settings.last_render_root and not self._defaults.render_root:
+            self._defaults.render_root = settings.last_render_root
+        self.form.set_settings(self._defaults)
+        self.folder.currentIndexChanged.connect(self._folder_changed)
+        self._folder_changed()
         lay.addWidget(self.form)
         lay.addWidget(QLabel("Each file gets its own folder inside the render folder. "
                              "Overrides apply to all files added here; leave them off to use each file's own settings."))
@@ -151,3 +204,15 @@ class AddJobsDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+
+    def _folder_changed(self):
+        gid = self.folder.currentData()
+        g = next((x for x in self.groups if x["id"] == gid), None)
+        if g and g.get("render_root"):
+            self.form.root.setText(g["render_root"])
+        elif not self.form.root.text():
+            self.form.root.setText(self._defaults.render_root or "")
+
+    @property
+    def group_id(self) -> str:
+        return self.folder.currentData() or ""

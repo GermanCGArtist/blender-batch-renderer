@@ -29,6 +29,7 @@ def main(argv=None):
     a.add_argument("--timeout", type=float)
     a.add_argument("--no-preview", action="store_true")
     a.add_argument("--preflight", action="store_true")
+    a.add_argument("--folder", default="", help="queue folder name (created if missing)")
     sub.add_parser("list")
     sub.add_parser("run")
     sc = sub.add_parser("scan")
@@ -36,6 +37,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     settings = AppSettings.load()
+    if args.cmd in ("add", "run"):
+        from .storage import InstanceLock
+        lock = InstanceLock()
+        if not lock.acquire():
+            print("Blender Batch Renderer is already running (window or command line). Close it first.")
+            return 1
     q = JobQueue()
     for w in q.load():
         print("warning:", w)
@@ -61,12 +68,19 @@ def main(argv=None):
                 s.frame_timeout_min = args.timeout
             s.make_preview = not args.no_preview
             s.preflight = args.preflight
-            j = q.add(f, s)
+            gid = ""
+            if args.folder:
+                g = next((g for g in q.groups if g["name"] == args.folder), None) or q.add_group(args.folder)
+                gid = g["id"]
+            j = q.add(f, s, group=gid)
             print(f"added {j.name} -> {j.folder}")
         return 0
     if args.cmd == "list":
-        for j in q.jobs:
-            print(f"{j.name:30s} {j.status:28s} {j.count('done')}/{j.total_frames or '?'}  {j.folder}")
+        for j in q.ordered_jobs():
+            g = q.group(j.group)
+            name = f"{g['name']}/{j.name}" if g else j.name
+            skip = "" if q.is_active(j) else " (skipped)"
+            print(f"{name:40s} {j.status + skip:30s} {j.count('done')}/{j.total_frames or '?'}  {j.folder}")
         return 0
     if args.cmd == "run":
         from .runner import Runner

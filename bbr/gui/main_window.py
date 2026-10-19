@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 from PySide6.QtCore import Qt, QObject, Signal, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFontDatabase, QKeySequence, QTextCursor
-from PySide6.QtWidgets import (QMainWindow, QWidget, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget,
+from PySide6.QtWidgets import (QMainWindow, QWidget, QSplitter, QTabWidget, QToolButton,
                                QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QLabel, QProgressBar,
                                QPlainTextEdit, QToolBar, QFileDialog, QMessageBox, QHeaderView,
                                QAbstractItemView, QPushButton, QCheckBox, QMenu, QListWidget,
@@ -19,14 +19,15 @@ from ..blendfile import version_str
 from ..installs import BlenderInstall, scan
 from ..jobqueue import JobQueue
 from ..models import (AppSettings, Job, JobSettings, QUEUED, RENDERING, STOPPED, DONE, DONE_ERRORS,
-                      FAILED, CANCELLED, F_DONE, F_FAILED, RUNNABLE)
+                      FAILED, CANCELLED, ON_HOLD, F_DONE, F_FAILED, RUNNABLE)
 from ..parse import fmt_duration, fmt_bytes
 from ..runner import Runner
-from .dialogs import SettingsDialog, AddJobsDialog
+from .dialogs import SettingsDialog, AddJobsDialog, FolderDialog
+from .queue_tree import QueueTree
 from .widgets import JobSettingsForm, Thumbnail, LineChart
 
 STATUS_COLORS = {RENDERING: "#3d8bfd", DONE: "#2fa84f", DONE_ERRORS: "#d39e00", FAILED: "#dc3545",
-                 CANCELLED: "#888888", STOPPED: "#e67e22"}
+                 CANCELLED: "#888888", STOPPED: "#e67e22", ON_HOLD: "#c678dd"}
 
 
 class Bridge(QObject):
@@ -41,7 +42,6 @@ def clock(ts: float) -> str:
 
 
 class MainWindow(QMainWindow):
-    COLS = ["Job", "Status", "Progress", "Frames", "Blender", "ETA"]
 
     def __init__(self):
         super().__init__()
@@ -58,9 +58,10 @@ class MainWindow(QMainWindow):
 
         self.console_buf: Dict[str, collections.deque] = {}
         self.pending_console: list = []
-        self.selected_id: Optional[str] = None
+        self.selected_id: Optional[str] = None     # selected job
+        self.selected_gid: Optional[str] = None    # selected queue folder
         self._quit_when_idle = False
-        self._row_ids: list = []
+        self._tree_sig = None
 
         self._build_actions()
         self._build_ui()
@@ -92,10 +93,15 @@ class MainWindow(QMainWindow):
                 a.setStatusTip(tip)
             return a
 
-        self.a_add = act("Add .blend…", self.add_files, "Ctrl+O", "Add .blend files to the queue (or drop them on the window)")
-        self.a_remove = act("Remove", self.remove_job, None, "Remove the selected job from the queue (files stay on disk)")
-        self.a_up = act("▲", lambda: self.move_job(-1), None, "Move job up")
-        self.a_down = act("▼", lambda: self.move_job(1), None, "Move job down")
+        self.a_add = act("Add .blend…", self.add_files, "Ctrl+O", "Add .blend files to the queue (or drop them on the list)")
+        self.a_add_existing = act("Add existing job folder…", self.add_existing, None,
+                                  "Put a job folder back into the queue, e.g. after moving the render folder")
+        self.a_new_folder = act("New folder…", self.new_folder, "Ctrl+Shift+N", "Create a folder to organise jobs")
+        self.a_edit_folder = act("Folder settings…", self.edit_folder, None, "Rename the folder / set its render folder")
+        self.a_remove = act("Remove", self.remove_selected, None,
+                            "Remove the selected job (files stay on disk) or folder (its jobs move to the top)")
+        self.a_up = act("▲", lambda: self.move_selected(-1), None, "Move up")
+        self.a_down = act("▼", lambda: self.move_selected(1), None, "Move down")
         self.a_start = act("▶  Start", self.start_batch, "Ctrl+R", "Render the queue (resumes where it stopped)")
         self.a_stop_after = act("Stop after frame", self.stop_after_frame, None,
                                 "Let the current frame finish, then stop")
@@ -105,20 +111,43 @@ class MainWindow(QMainWindow):
                             "Stop the current job, mark it cancelled and continue with the next one")
         self.a_retry = act("Retry failed frames", self.retry_failed, None,
                            "Queue the selected job again, rendering only frames that failed")
+        self.a_accept = act("Continue with changed file", self.accept_changed, None,
+                            "The .blend was saved again after frames were rendered: keep the finished frames "
+                            "and render the rest from the changed file")
         self.a_reset = act("Start job over…", self.reset_job, None, "Forget progress and render every frame again")
-        self.a_preview = act("Create preview", self.create_preview, None,
+        self.a_preview = act("Create preview", self.create_preview, "Ctrl+P",
                              "Encode the frames finished so far into preview/<job>.mp4")
-        self.a_folder = act("Open folder", self.open_folder, None, "Open the job's render folder")
+        self.a_folder = act("Open render folder", self.open_folder, None, "Open the job's render folder")
         self.a_settings = act("Settings…", self.open_settings, "Ctrl+,", "Blender installs and defaults")
+        self.a_settings.setMenuRole(QAction.MenuRole.PreferencesRole)
 
         tb = QToolBar("Main")
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        for a in (self.a_add, self.a_remove, self.a_up, self.a_down, None, self.a_start, self.a_stop_after,
-                  self.a_stop_now, self.a_cancel, None, self.a_retry, self.a_reset, self.a_preview,
-                  self.a_folder, None, self.a_settings):
+        for a in (self.a_add, self.a_new_folder, self.a_remove, self.a_up, self.a_down, None, self.a_start,
+                  self.a_stop_after, self.a_stop_now, self.a_cancel, None):
             tb.addSeparator() if a is None else tb.addAction(a)
+        self.job_menu = QMenu("Job", self)
+        for a in (self.a_retry, self.a_accept, self.a_reset, None, self.a_preview, self.a_folder):
+            self.job_menu.addSeparator() if a is None else self.job_menu.addAction(a)
+        jb = QToolButton()
+        jb.setText("Job ▾")
+        jb.setMenu(self.job_menu)
+        jb.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        tb.addWidget(jb)
+        tb.addSeparator()
+        tb.addAction(self.a_settings)
         self.addToolBar(tb)
+
+        mb = self.menuBar()
+        fm = mb.addMenu("File")
+        for a in (self.a_add, self.a_add_existing, None, self.a_new_folder, self.a_edit_folder, None, self.a_settings):
+            fm.addSeparator() if a is None else fm.addAction(a)
+        qm = mb.addMenu("Queue")
+        for a in (self.a_start, self.a_stop_after, self.a_stop_now, self.a_cancel, None, self.a_up, self.a_down,
+                  self.a_remove):
+            qm.addSeparator() if a is None else qm.addAction(a)
+        mb.addMenu(self.job_menu)
 
     def _build_ui(self):
         central = QWidget()
@@ -138,22 +167,17 @@ class MainWindow(QMainWindow):
         vsplit = QSplitter(Qt.Orientation.Vertical)
         hsplit = QSplitter(Qt.Orientation.Horizontal)
 
-        # ---- queue table ----------------------------------------------------
-        self.table = QTableWidget(0, len(self.COLS))
-        self.table.setHorizontalHeaderLabels(self.COLS)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.verticalHeader().setVisible(False)
-        hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for c in range(1, len(self.COLS)):
-            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.itemSelectionChanged.connect(self._on_select)
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._context_menu)
-        self.table.doubleClicked.connect(lambda *_: self.open_folder())
-        hsplit.addWidget(self.table)
+        # ---- queue tree -----------------------------------------------------
+        self.tree = QueueTree()
+        self.tree.itemSelectionChanged.connect(self._on_select)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._context_menu)
+        self.tree.itemDoubleClicked.connect(lambda *_: self.open_folder() if self._sel() else self.edit_folder())
+        self.tree.order_changed.connect(self._on_tree_order)
+        self.tree.files_dropped.connect(lambda files, gid: self.add_files(files, gid))
+        self.tree.check_changed.connect(self._on_check)
+        self.tree.expanded_changed.connect(self._on_expanded)
+        hsplit.addWidget(self.tree)
 
         # ---- right side tabs -------------------------------------------------
         self.tabs = QTabWidget()
@@ -327,32 +351,30 @@ class MainWindow(QMainWindow):
     # table
     # ======================================================================
     def _refresh_table(self, full: bool = False):
-        ids = [j.id for j in self.queue.jobs]
-        if full or ids != self._row_ids:
-            sel = self.selected_id
-            self.table.blockSignals(True)
-            self.table.setRowCount(len(ids))
-            for r in range(len(ids)):
-                for c in range(len(self.COLS)):
-                    if c == 2:
-                        if not isinstance(self.table.cellWidget(r, c), QProgressBar):
-                            bar = QProgressBar()
-                            bar.setMaximumHeight(18)
-                            self.table.setCellWidget(r, c, bar)
-                    elif self.table.item(r, c) is None:
-                        self.table.setItem(r, c, QTableWidgetItem())
-            self._row_ids = ids
-            self.table.blockSignals(False)
-            if sel in ids:
-                self.table.selectRow(ids.index(sel))
-            elif ids:
-                self.table.selectRow(0)
+        sig = QueueTree.signature(self.queue)
+        if full or sig != self._tree_sig:
+            sel = ("j", self.selected_id) if self.selected_id else ("g", self.selected_gid) if self.selected_gid else None
+            self.tree.blockSignals(True)
+            self.tree.rebuild(self.queue)
+            self.tree.blockSignals(False)
+            self._tree_sig = sig
+            if sel and (sel[1] in self.tree.job_items or sel[1] in self.tree.group_items):
+                self.tree.select(*sel)
+            elif self.queue.ordered_jobs():
+                self.tree.select("j", self.queue.ordered_jobs()[0].id)
             else:
-                self.selected_id = None
-        for r, j in enumerate(self.queue.jobs):
-            self._fill_row(r, j)
+                self.selected_id = self.selected_gid = None
+            self._on_select()
+        for jid, it in self.tree.job_items.items():
+            j = self.queue.find(jid)
+            if j:
+                self._fill_row(it, j)
+        for g in self.queue.groups:
+            it = self.tree.group_items.get(g["id"])
+            if it:
+                self._fill_group_row(it, g)
 
-    def _fill_row(self, r: int, j: Job):
+    def _fill_row(self, it, j: Job):
         total = j.total_frames
         done = j.count(F_DONE)
         failed = j.count(F_FAILED)
@@ -362,24 +384,23 @@ class MainWindow(QMainWindow):
                      "waiting": "waiting to retry"}.get(self.runner.live.phase)
             if extra:
                 status = f"{j.status} – {extra}"
-        items = [
-            (0, j.name, f"{j.blend_path}\n→ {j.folder}"),
-            (1, status, j.status_note),
-            (3, f"{done}{'+' + str(failed) + ' failed' if failed else ''} / {total if total is not None else '?'}", None),
-            (4, (j.blender_used or {}).get("label", f"auto (file {version_str(j.file_version)})"),
-             (j.blender_used or {}).get("reason")),
-            (5, self._eta_text(j), None),
-        ]
-        for c, text, tip in items:
-            it = self.table.item(r, c)
-            if it is None:
-                continue
-            it.setText(str(text))
-            it.setToolTip(tip or "")
-            if c == 1:
-                col = STATUS_COLORS.get(j.status)
-                it.setForeground(QColor(col) if col else self.palette().text())
-        bar = self.table.cellWidget(r, 2)
+        if not self.queue.is_active(j) and j.status in RUNNABLE:
+            status += " (skipped)"
+        cols = {
+            0: (j.name, f"{j.blend_path}\n→ {j.folder}"),
+            1: (status, j.status_note),
+            3: (f"{done}{' +' + str(failed) + ' failed' if failed else ''} / {total if total is not None else '?'}", None),
+            4: ((j.blender_used or {}).get("label", f"auto (file {version_str(j.file_version)})"),
+                (j.blender_used or {}).get("reason")),
+            5: (self._eta_text(j), None),
+        }
+        for c, (text, tip) in cols.items():
+            if it.text(c) != str(text):
+                it.setText(c, str(text))
+            it.setToolTip(c, tip or "")
+        col = STATUS_COLORS.get(j.status)
+        it.setForeground(1, QColor(col) if col else self.palette().text())
+        bar = self.tree.itemWidget(it, 2)
         if isinstance(bar, QProgressBar):
             if total:
                 frac = (done + failed) / total
@@ -387,13 +408,33 @@ class MainWindow(QMainWindow):
                     ff = self.runner.live.frame_fraction()
                     if ff and self.runner.live.frame is not None:
                         frac += ff / total
-                bar.setRange(0, 1000)
                 bar.setValue(int(min(1.0, frac) * 1000))
                 bar.setFormat(f"{frac * 100:.1f}%")
             else:
-                bar.setRange(0, 1000)
                 bar.setValue(0)
                 bar.setFormat("–")
+
+    def _fill_group_row(self, it, g: dict):
+        jobs = self.queue.jobs_in(g["id"])
+        n_done = sum(1 for j in jobs if j.status in (DONE, DONE_ERRORS))
+        rendering = any(self._is_current(j) for j in jobs)
+        known = [j for j in jobs if j.total_frames]
+        tot = sum(j.total_frames for j in known)
+        fin = sum(j.count(F_DONE) + j.count(F_FAILED) for j in known)
+        etas = [self._job_eta(j) for j in jobs if j.status in RUNNABLE and self.queue.is_active(j)]
+        eta = sum(e for e in etas if e is not None)
+        status = f"{n_done}/{len(jobs)} jobs done" + (" · rendering" if rendering else "")
+        if not g.get("enabled", True):
+            status += " · skipped"
+        it.setText(0, f"{g['name']}  ({len(jobs)})")
+        it.setToolTip(0, f"Render folder: {g.get('render_root') or '(per job)'}")
+        it.setText(1, status)
+        it.setText(3, f"{fin} / {tot}" if known else "")
+        it.setText(5, fmt_duration(eta) if etas and eta else ("done" if jobs and n_done == len(jobs) else ""))
+        bar = self.tree.itemWidget(it, 2)
+        if isinstance(bar, QProgressBar):
+            bar.setValue(int(fin / tot * 1000) if tot else 0)
+            bar.setFormat(f"{fin / tot * 100:.1f}%" if tot else "–")
 
     def _eta_text(self, j: Job) -> str:
         if j.status in (DONE, DONE_ERRORS):
@@ -416,20 +457,27 @@ class MainWindow(QMainWindow):
         return j.eta_seconds()
 
     def _on_select(self):
-        rows = {i.row() for i in self.table.selectedIndexes()}
-        if not rows:
-            return
-        r = min(rows)
-        if r < len(self._row_ids):
-            new = self._row_ids[r]
-            if new != self.selected_id:
-                self.selected_id = new
-                self._load_selected()
+        sel = self.tree.selected()
+        jid = sel[1] if sel and sel[0] == "j" else None
+        gid = sel[1] if sel and sel[0] == "g" else None
+        changed = (jid != self.selected_id) or (gid != self.selected_gid)
+        self.selected_id, self.selected_gid = jid, gid
+        if changed:
+            self._load_selected()
         self._update_actions()
 
     def _load_selected(self):
         j = self._sel()
+        self.tabs.setEnabled(j is not None)
         if not j:
+            g = self.queue.group(self.selected_gid) if self.selected_gid else None
+            self.l_frame.setText(g["name"] if g else "–")
+            self.l_phase.setText("Folder – select a job to see its details" if g else "")
+            self.thumb.show_file(None)
+            self.issues.setPlainText("")
+            self.chart_time.set_data([], [[]])
+            self.chart_mem.set_data([], [[], []])
+            self._reload_console()
             return
         self.job_form.reload_installs()
         self.job_form.set_settings(j.settings)
@@ -439,35 +487,56 @@ class MainWindow(QMainWindow):
         self._refresh_issues()
         last = j.done_records()
         last.sort(key=lambda r: r.get("finished_at") or 0)
-        self.thumb.show_file(last[-1]["file"] if last else None)
+        self.thumb.show_file(last[-1]["path"] if last else None)
 
     def _context_menu(self, pos):
         m = QMenu(self)
-        for a in (self.a_start, self.a_stop_after, self.a_stop_now, self.a_cancel, None, self.a_retry, self.a_reset,
-                  self.a_preview, self.a_folder, None, self.a_up, self.a_down, self.a_remove):
-            m.addSeparator() if a is None else m.addAction(a)
         j = self._sel()
-        if j and j.preview_path and os.path.exists(j.preview_path):
-            m.addSeparator()
-            m.addAction("Play preview").triggered.connect(lambda: self._open_path(j.preview_path))
+        g = self.queue.group(self.selected_gid) if self.selected_gid else None
         if j:
-            m.addAction("Open report.xlsx").triggered.connect(lambda: self._open_path(j.data_dir / "report.xlsx")
-                                                             if (j.data_dir / "report.xlsx").exists() else None)
-        m.exec(self.table.viewport().mapToGlobal(pos))
+            for a in (self.a_retry, self.a_accept, self.a_reset, None, self.a_preview, self.a_folder):
+                m.addSeparator() if a is None else m.addAction(a)
+            if j.preview_path and os.path.exists(j.preview_path):
+                m.addAction("Play preview").triggered.connect(lambda: self._open_path(j.preview_path))
+            rep = j.data_dir / "report.xlsx"
+            if rep.exists():
+                m.addAction("Open report.xlsx").triggered.connect(lambda: self._open_path(rep))
+            m.addSeparator()
+            mv = m.addMenu("Move to folder")
+            mv.addAction("— top level —").triggered.connect(lambda: self._move_to_group(j, ""))
+            for grp in self.queue.groups:
+                a = mv.addAction(grp["name"])
+                a.setEnabled(grp["id"] != j.group)
+                a.triggered.connect(lambda _=False, gid=grp["id"]: self._move_to_group(j, gid))
+            mv.addSeparator()
+            mv.addAction("New folder…").triggered.connect(lambda: self.new_folder(move_job=j))
+        elif g:
+            m.addAction(self.a_edit_folder)
+            m.addAction("Add .blend files to this folder…").triggered.connect(lambda: self.add_files(None, g["id"]))
+        else:
+            m.addAction(self.a_add)
+            m.addAction(self.a_new_folder)
+        m.addSeparator()
+        for a in (self.a_up, self.a_down, self.a_remove):
+            m.addAction(a)
+        m.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _update_actions(self):
         j = self._sel()
+        g = self.selected_gid
         running = self.runner.running
         cur = self._is_current(j)
-        self.a_start.setEnabled(not running and any(x.status in RUNNABLE for x in self.queue.jobs))
+        self.a_start.setEnabled(not running and self.queue.next_runnable() is not None)
         self.a_stop_after.setEnabled(running and not self.runner.stopping)
         self.a_stop_now.setEnabled(running)
         self.a_cancel.setEnabled(running and self.runner.current is not None)
-        self.a_remove.setEnabled(bool(j) and not cur)
-        self.a_up.setEnabled(bool(j))
-        self.a_down.setEnabled(bool(j))
-        self.a_retry.setEnabled(bool(j) and not cur and j.count(F_FAILED) > 0
-                                or bool(j) and not cur and j.status in (FAILED, CANCELLED))
+        self.a_remove.setEnabled((bool(j) and not cur) or bool(g))
+        self.a_up.setEnabled(bool(j) or bool(g))
+        self.a_down.setEnabled(bool(j) or bool(g))
+        self.a_edit_folder.setEnabled(bool(g))
+        self.a_retry.setEnabled(bool(j) and not cur and (j.count(F_FAILED) > 0
+                                                         or j.status in (FAILED, CANCELLED, ON_HOLD)))
+        self.a_accept.setEnabled(bool(j) and not cur and j.status == ON_HOLD and j.blend_changed())
         self.a_reset.setEnabled(bool(j) and not cur)
         self.a_preview.setEnabled(bool(j) and j.count(F_DONE) > 0)
         self.a_folder.setEnabled(bool(j))
@@ -687,7 +756,7 @@ class MainWindow(QMainWindow):
                 j = self._sel()
                 rec = j.frames.get(str(p["frame"])) if j else None
                 if rec:
-                    self.thumb.show_file(rec.get("file"))
+                    self.thumb.show_file(str(j.frame_file(int(p["frame"]), rec)))
                 self._refresh_charts()
                 self._refresh_live()
         elif kind == "preview":
@@ -701,30 +770,108 @@ class MainWindow(QMainWindow):
     # ======================================================================
     # actions
     # ======================================================================
-    def add_files(self, files=None):
+    def add_files(self, files=None, gid=None):
         if not files:
             start = self.settings.last_render_root or os.path.expanduser("~")
             files, _ = QFileDialog.getOpenFileNames(self, "Add .blend files", start, "Blender files (*.blend)")
         files = [f for f in files if f.lower().endswith(".blend")]
         if not files:
             return
-        dlg = AddJobsDialog(files, self.settings, self._installs(), self)
+        if gid is None:
+            j = self._sel()
+            gid = self.selected_gid or (j.group if j else "")
+        dlg = AddJobsDialog(files, self.settings, self._installs(), self, groups=self.queue.groups, group_id=gid or "")
         if dlg.exec() != AddJobsDialog.DialogCode.Accepted:
             return
         s = dlg.form.get_settings()
         if s.render_root:
             self.settings.last_render_root = s.render_root
             self.settings.save()
+        last = None
         for f in files:
             js = JobSettings.from_dict(vars(s).copy())
-            js.render_root = s.render_root
-            j = self.queue.add(f, js)
-            self._add_message("info", f"Added {j.name} → {j.folder}"
-                              + (" (re-attached to existing render folder, finished frames kept)" if j.frames else ""))
+            last = self.queue.add(f, js, group=dlg.group_id)
+            self._add_message("info", f"Added {last.name} → {last.folder}"
+                              + (" (re-attached to existing render folder, finished frames kept)" if last.frames else ""))
+        self.selected_id, self.selected_gid = (last.id if last else None), None
         self._refresh_table(full=True)
         self._update_actions()
 
-    def remove_job(self):
+    def add_existing(self):
+        d = QFileDialog.getExistingDirectory(self, "Choose a job folder (the one containing job.json)",
+                                             self.settings.last_render_root or os.path.expanduser("~"))
+        if not d:
+            return
+        try:
+            j = self.queue.add_existing(d, self.selected_gid or "")
+        except ValueError as e:
+            QMessageBox.warning(self, "Add job folder", str(e))
+            return
+        self._add_message("info", f"Re-added {j.name} from {j.folder} ({j.count(F_DONE)} frames already done)")
+        self.selected_id, self.selected_gid = j.id, None
+        self._refresh_table(full=True)
+        self._update_actions()
+
+    def new_folder(self, move_job: Optional[Job] = None):
+        dlg = FolderDialog(parent=self)
+        if dlg.exec() != FolderDialog.DialogCode.Accepted:
+            return
+        g = self.queue.add_group(dlg.name.text().strip() or "Folder", dlg.root.text().strip())
+        if move_job:
+            self.queue.set_group(move_job, g["id"])
+        else:
+            self.selected_id, self.selected_gid = None, g["id"]
+        self._refresh_table(full=True)
+
+    def edit_folder(self):
+        g = self.queue.group(self.selected_gid) if self.selected_gid else None
+        if not g:
+            return
+        dlg = FolderDialog(g["name"], g.get("render_root", ""), self, title="Folder settings")
+        if dlg.exec() == FolderDialog.DialogCode.Accepted:
+            g["name"] = dlg.name.text().strip() or g["name"]
+            g["render_root"] = dlg.root.text().strip()
+            self.queue.save()
+            self._refresh_table(full=True)
+
+    def _move_to_group(self, j: Job, gid: str):
+        self.queue.set_group(j, gid)
+        self._refresh_table(full=True)
+
+    def _on_tree_order(self, top, groups):
+        self.queue.set_order(top, groups)
+        self._refresh_table(full=True)
+
+    def _on_check(self, kind, ident, checked):
+        if kind == "j":
+            j = self.queue.find(ident)
+            if j:
+                j.enabled = checked
+                self.queue.save_job(j)
+        else:
+            g = self.queue.group(ident)
+            if g:
+                g["enabled"] = checked
+                self.queue.save()
+        self._refresh_table()
+        self._update_actions()
+
+    def _on_expanded(self, gid, state):
+        g = self.queue.group(gid)
+        if g:
+            g["expanded"] = state
+            self.queue.save()
+
+    def remove_selected(self):
+        if self.selected_gid:
+            g = self.queue.group(self.selected_gid)
+            if g and QMessageBox.question(self, "Delete folder", f"Delete the folder '{g['name']}'?\n"
+                                          "Its jobs move to the top level of the queue.") \
+                    == QMessageBox.StandardButton.Yes:
+                self.queue.remove_group(g["id"])
+                self.selected_gid = None
+                self._refresh_table(full=True)
+            return
         j = self._sel()
         if not j or self._is_current(j):
             return
@@ -738,11 +885,13 @@ class MainWindow(QMainWindow):
         self._refresh_table(full=True)
         self._update_actions()
 
-    def move_job(self, d):
+    def move_selected(self, d):
         j = self._sel()
         if j:
             self.queue.move(j, d)
-            self._refresh_table(full=True)
+        elif self.selected_gid:
+            self.queue.move_group(self.selected_gid, d)
+        self._refresh_table(full=True)
 
     def start_batch(self):
         if not self.settings.installs:
@@ -773,6 +922,15 @@ class MainWindow(QMainWindow):
         if j and not self._is_current(j):
             self.queue.reset_job(j, keep_frames=True)
             self._add_message("info", f"{j.name}: queued again, failed frames will be retried")
+            self._refresh_table()
+            self._update_actions()
+
+    def accept_changed(self):
+        j = self._sel()
+        if j and j.status == ON_HOLD:
+            self.queue.accept_changed_blend(j)
+            self._add_message("info", f"{j.name}: will continue with the changed .blend "
+                                      f"({j.count(F_DONE)} finished frames kept)")
             self._refresh_table()
             self._update_actions()
 

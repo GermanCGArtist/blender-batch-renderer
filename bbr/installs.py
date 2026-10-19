@@ -47,7 +47,7 @@ def resolve_executable(path: str) -> Optional[str]:
         candidates.append(p)
     for c in candidates:
         if c.is_file() and os.access(str(c), os.X_OK):
-            return str(c)
+            return os.path.abspath(str(c))
     return None
 
 
@@ -65,7 +65,7 @@ def probe(path: str, timeout: float = 90) -> Optional[BlenderInstall]:
         return None
     ver = (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
     first = next((l.strip() for l in out.splitlines() if l.strip().startswith("Blender")), f"Blender {ver}")
-    return BlenderInstall(str(Path(path).expanduser()), exe, ver, first)
+    return BlenderInstall(os.path.abspath(str(Path(path).expanduser())), exe, ver, first)
 
 
 def default_search_paths() -> List[str]:

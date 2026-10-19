@@ -19,10 +19,12 @@ from .installs import BlenderInstall, choose_install
 from .jobqueue import JobQueue
 from .keepawake import KeepAwake
 from .models import (AppSettings, Job, RUNNABLE, QUEUED, RENDERING, STOPPED, DONE, DONE_ERRORS,
-                     FAILED, CANCELLED, F_DONE, F_FAILED, F_PENDING)
-from .parse import parse_marker, parse_status
+                     FAILED, CANCELLED, ON_HOLD, F_DONE, F_FAILED, F_PENDING)
+from .parse import parse_marker, parse_status, parse_stats, fmt_bytes
 from .process import BlenderProcess
-from .storage import atomic_write_json
+from .storage import atomic_write_json, free_bytes
+
+DISK_FULL_HINTS = ("No space left", "Errno 28", "disk full", "ENOSPC")
 
 SCRIPTS = Path(__file__).resolve().parent / "blender_scripts"
 RENDER_SCRIPT = str(SCRIPTS / "bbr_render.py")
@@ -80,6 +82,7 @@ class Runner:
         self._stop_batch = False          # stop after the current job reacts
         self._stop_after_frame = False
         self._cancel_job = False
+        self._stop_note = ""
         self._wake = threading.Event()
         self._keep = KeepAwake()
         self._preview_threads = {}
@@ -89,6 +92,7 @@ class Runner:
         if self.running:
             return False
         self._stop_batch = self._stop_after_frame = self._cancel_job = False
+        self._stop_note = ""
         self.running = True
         self._thread = threading.Thread(target=self._run_batch, name="bbr-runner", daemon=True)
         self._thread.start()
@@ -147,11 +151,26 @@ class Runner:
         return choose_install(insts, fv)
 
     def _next_job(self) -> Optional[Job]:
-        with self.queue.lock:
-            for j in self.queue.jobs:
-                if j.status in RUNNABLE:
-                    return j
-        return None
+        return self.queue.next_runnable()
+
+    # ---- disk space -------------------------------------------------------
+    def _disk_ok(self, job: Job) -> bool:
+        """False (and the batch is stopped) when the render drive is nearly full."""
+        free = free_bytes(job.frames_dir)
+        if free is None:
+            return True
+        need = max(float(self.settings.min_free_gb or 0) * 1024 ** 3, 3 * (job.avg_frame_bytes() or 0))
+        if free >= need:
+            return True
+        self._disk_full(job, f"only {fmt_bytes(free)} free on the render drive")
+        return False
+
+    def _disk_full(self, job: Job, why: str):
+        self._stop_batch = True
+        self._stop_note = f"disk almost full – {why}. Free some space, then press Start"
+        self._msg("error", f"{job.name}: stopping the batch, {why}", job)
+        if self._proc:
+            self._proc.kill("disk")
 
     # ---- batch loop -------------------------------------------------------
     def _run_batch(self):
@@ -201,6 +220,20 @@ class Runner:
         dropped = job.verify_done_frames()
         if dropped:
             self._msg("warn", f"{job.name}: {dropped} finished frame(s) missing on disk, they will be rendered again", job)
+        if not os.path.exists(job.blend_path):
+            job.status, job.status_note = ON_HOLD, f".blend file not found: {job.blend_path}"
+            self._job_changed(job)
+            self._msg("error", f"{job.name}: {job.status_note} – skipping it", job)
+            return
+        if job.blend_changed():
+            job.status = ON_HOLD
+            job.status_note = (".blend was saved again after frames were rendered – choose "
+                               "'Continue with changed file' or 'Start job over'")
+            self._job_changed(job)
+            self._msg("warn", f"{job.name}: {job.status_note}. Skipping it for now.", job)
+            return
+        if not job.blend_stamp or not job.count(F_DONE):
+            job.blend_stamp = job.current_blend_stamp()
         inst, why = self.resolve_install(job)
         if inst is None:
             job.status, job.status_note = FAILED, why
@@ -224,9 +257,13 @@ class Runner:
             rem = job.remaining_frames()
             if rem is not None and not rem:
                 break
+            if not self._disk_ok(job):
+                continue        # -> _handle_interrupt stops the job
             outcome = self._run_attempt(job, inst)
             if outcome == "complete":
                 break
+            if outcome == "chunk":
+                continue        # planned Blender restart, not a failure
             if self._handle_interrupt(job):
                 return
             if outcome == "failed":
@@ -257,7 +294,7 @@ class Runner:
             self._cancel_job = False
             return True
         if self._stop_batch:
-            job.status, job.status_note = STOPPED, "stopped by user"
+            job.status, job.status_note = STOPPED, self._stop_note or "stopped by user"
             self._job_changed(job)
             self._finish_reports(job)
             return True
@@ -285,6 +322,7 @@ class Runner:
             "frames_dir": str(job.frames_dir),
             "prefix": job.file_prefix,
             "skip": job.skip_frames(),
+            "max_frames": int(s.restart_every or 0),
             "overrides": {"frame_start": s.frame_start, "frame_end": s.frame_end,
                           "samples": s.samples, "resolution_pct": s.resolution_pct},
         }
@@ -299,7 +337,7 @@ class Runner:
         job.attempts.append(attempt)
         self._job_changed(job)
 
-        state = {"all_done": False, "error": "", "last_emit": 0.0}
+        state = {"all_done": False, "chunk_done": False, "error": "", "last_emit": 0.0}
         self.live.reset(job.id)
         self.live.phase = "loading"
 
@@ -320,19 +358,7 @@ class Runner:
                 return
             st = parse_status(line)
             if st:
-                L = self.live
-                L.sample = st.get("sample", L.sample)
-                L.samples = st.get("samples", L.samples)
-                if "remaining_s" in st:
-                    L.remaining_s = st["remaining_s"]
-                if "elapsed_s" in st:
-                    L.elapsed_s = st["elapsed_s"]
-                if "peak_mb" in st:
-                    L.peak_mb = max(L.peak_mb or 0, st["peak_mb"])
-                now = time.time()
-                if now - state["last_emit"] > 0.25:
-                    state["last_emit"] = now
-                    self.emit("progress", {"job_id": job.id})
+                self._apply_stats(job, st, state)
             elif line.startswith("Error") or "Traceback" in line:
                 state["error"] = (state["error"] + "\n" + line).strip()[-2000:]
 
@@ -356,6 +382,11 @@ class Runner:
         reason = proc.kill_reason
 
         try:
+            if reason == "disk" or any(h in state["error"] for h in DISK_FULL_HINTS):
+                attempt["reason"] = "disk full"
+                if reason != "disk":
+                    self._disk_full(job, "Blender could not save a frame (disk full)")
+                return "stopped"
             if reason == "stop" and job.remaining_frames() == []:
                 attempt["reason"] = "completed (stop requested after last frame)"
                 return "complete"
@@ -365,6 +396,9 @@ class Runner:
             if state["all_done"] and rc == 0:
                 attempt["reason"] = "completed"
                 return "complete"
+            if state["chunk_done"] and rc == 0:
+                attempt["reason"] = f"planned restart after {attempt['frames_rendered']} frames"
+                return "chunk"
             # ---- failure ----
             why = "frame timeout" if reason == "timeout" else f"Blender exited with code {rc}"
             if state["error"]:
@@ -400,9 +434,28 @@ class Runner:
             self.live.reset(job.id)
             self._job_changed(job)
 
+    def _apply_stats(self, job: Job, st: dict, state: dict):
+        L = self.live
+        L.sample = st.get("sample", L.sample)
+        L.samples = st.get("samples", L.samples)
+        if "remaining_s" in st:
+            L.remaining_s = st["remaining_s"]
+        if "elapsed_s" in st:
+            L.elapsed_s = st["elapsed_s"]
+        if "peak_mb" in st:
+            L.peak_mb = max(L.peak_mb or 0, st["peak_mb"])
+        now = time.time()
+        if now - state["last_emit"] > 0.25:
+            state["last_emit"] = now
+            self.emit("progress", {"job_id": job.id})
+
     def _on_marker(self, job: Job, attempt: dict, proc: BlenderProcess, state: dict, kind: str, data: dict):
         L = self.live
-        if kind == "JOB_INFO":
+        if kind == "STATS":
+            self._apply_stats(job, parse_stats(str(data.get("s", ""))), state)
+        elif kind == "CHUNK_DONE":
+            state["chunk_done"] = True
+        elif kind == "JOB_INFO":
             job.scene_info = data
             self._job_changed(job)
         elif kind == "WARN":
@@ -423,6 +476,7 @@ class Runner:
                 "render_s": data.get("render_s"),
                 "save_s": data.get("save_s"),
                 "file": data.get("file"),
+                "rel": os.path.relpath(data["file"], job.folder) if data.get("file") else None,
                 "size": data.get("size"),
                 "finished_at": time.time(),
                 "blender_peak_mb": data.get("peak_mb") or L.peak_mb,
@@ -438,6 +492,8 @@ class Runner:
             self.queue.save_job(job)
             reports.append_frame(job, f, rec, attempt["n"])
             self.emit("frame_done", {"job_id": job.id, "frame": f})
+            if not self._disk_ok(job):
+                return
             if self._stop_after_frame or self._cancel_job:
                 proc.kill("stop" if not self._cancel_job else "cancel")
         elif kind == "FRAME_ERROR":

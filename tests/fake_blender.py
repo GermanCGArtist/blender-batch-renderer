@@ -11,6 +11,8 @@ Behaviour switches (environment variables):
   FAKE_LOAD_FAIL=1        exit before rendering anything
   FAKE_NO_CAMERA=1        scene without camera
   FAKE_VIDEO=1            scene output set to FFMPEG
+  FAKE_NEW_LOG=1          behave like Blender 5.x (no Fra: status lines)
+  FAKE_DISK_FULL=4        saving this frame fails with "No space left on device"
 """
 import os
 import struct
@@ -98,9 +100,13 @@ def op_render(write_still=False, animation=False):
     steps = 4
     for i in range(1, steps + 1):
         time.sleep(ft / steps)
-        s = (f"Fra:{f} Mem:120.00M (Peak 150.00M) | Time:00:0{i}.00 | Remaining:00:0{steps - i}.50 | "
-             f"Mem:80.00M, Peak:{100 + f}.00M | Scene, ViewLayer | Sample {total * i // steps}/{total}")
-        print(s, flush=True)
+        if env.get("FAKE_NEW_LOG"):   # Blender 5.x: no status lines, stats only via handler
+            s = f"Frame:{f} | Time:00:0{i}.00 | Remaining:00:0{steps - i}.50 | Mem: {200 + f}M | Sample {total * i // steps}/{total}"
+            print(f"00:0{i}.000  render           | something", flush=True)
+        else:
+            s = (f"Fra:{f} Mem:120.00M (Peak 150.00M) | Time:00:0{i}.00 | Remaining:00:0{steps - i}.50 | "
+                 f"Mem:80.00M, Peak:{100 + f}.00M | Scene, ViewLayer | Sample {total * i // steps}/{total}")
+            print(s, flush=True)
         for h in handlers.render_stats:
             h(s)
         crash_once = [int(x) for x in env.get("FAKE_CRASH_ONCE", "").split(",") if x]
@@ -120,7 +126,11 @@ def op_render(write_still=False, animation=False):
 class Images(dict):
     def get(self, k, d=None):
         if k == "Render Result" and state["result"]:
-            return NS(save_render=lambda path, scene=None: tiny_png(path))
+            def save(path, scene=None):
+                if str(scene.frame_current) in env.get("FAKE_DISK_FULL", "").split(","):
+                    raise OSError(28, "No space left on device")
+                tiny_png(path)
+            return NS(save_render=save)
         return d
 
 

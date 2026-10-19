@@ -42,11 +42,22 @@ def main():
         C.out("FATAL", {"error": "Scene '%s' has no active camera" % scene.name})
         sys.exit(4)
 
-    last = {"stats": ""}
+    last = {"stats": "", "sent": 0.0, "peak": None}
 
     def on_stats(*a):
-        if a:
-            last["stats"] = str(a[0])
+        # Blender 5+ no longer prints progress lines in background mode, so forward
+        # the stats string (samples, remaining time, memory) to the batch renderer.
+        if not a:
+            return
+        text = str(a[0])
+        last["stats"] = text
+        pk = C.peak_mb(text)
+        if pk is not None:
+            last["peak"] = pk if last["peak"] is None else max(last["peak"], pk)
+        now = time.time()
+        if now - last["sent"] >= 0.25:
+            last["sent"] = now
+            C.out("STATS", {"s": text})
 
     bpy.app.handlers.render_stats.append(on_stats)
 
@@ -55,10 +66,15 @@ def main():
     frames = list(range(scene.frame_start, scene.frame_end + 1, max(1, scene.frame_step)))
     todo = [f for f in frames if f not in skip]
     C.out("PLAN", {"total": len(frames), "todo": len(todo)})
+    max_frames = int(args.get("max_frames") or 0)   # restart Blender every N frames
 
-    for f in todo:
+    for i, f in enumerate(todo):
+        if max_frames and i >= max_frames:
+            C.out("CHUNK_DONE", {"rendered": i})
+            return
         C.out("FRAME_START", {"frame": f})
         last["stats"] = ""
+        last["peak"] = None
         t0 = time.time()
         try:
             scene.frame_set(f)
@@ -83,7 +99,7 @@ def main():
             "save_s": round(t2 - t1, 3),
             "file": final,
             "size": os.path.getsize(final),
-            "peak_mb": C.peak_mb(last["stats"]),
+            "peak_mb": last["peak"],
             "samples": info.get("samples"),
             "stats": last["stats"],
         })

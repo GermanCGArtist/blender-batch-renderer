@@ -98,6 +98,13 @@ class JobSettingsForm(QWidget):
         self.timeout.setSuffix(" min")
         self.timeout.setSpecialValueText("no limit")
         form.addRow("Frame timeout", self.timeout)
+        self.restart_every = QSpinBox()
+        self.restart_every.setRange(0, 100000)
+        self.restart_every.setSuffix(" frames")
+        self.restart_every.setSpecialValueText("never")
+        self.restart_every.setToolTip("Start a fresh Blender process every N frames. Helps when Blender's memory "
+                                      "grows over a long sequence; costs one file load each time.")
+        form.addRow("Restart Blender every", self.restart_every)
         self.preview = QCheckBox("Make an MP4 preview when the job finishes")
         form.addRow("", self.preview)
         self.preflight = QCheckBox("Check the file first (missing textures, unbaked sims …)")
@@ -136,6 +143,7 @@ class JobSettingsForm(QWidget):
         self.timeout.setValue(float(s.frame_timeout_min or 0))
         self.preview.setChecked(bool(s.make_preview))
         self.preflight.setChecked(bool(s.preflight))
+        self.restart_every.setValue(int(s.restart_every or 0))
 
     def get_settings(self) -> JobSettings:
         return JobSettings(
@@ -145,7 +153,7 @@ class JobSettingsForm(QWidget):
             samples=self.samples.value(), resolution_pct=self.res_pct.value(),
             max_attempts=self.max_attempts.value(), retry_delay_s=self.retry_delay.value(),
             frame_timeout_min=self.timeout.value(), make_preview=self.preview.isChecked(),
-            preflight=self.preflight.isChecked())
+            preflight=self.preflight.isChecked(), restart_every=self.restart_every.value())
 
 
 class Thumbnail(QLabel):

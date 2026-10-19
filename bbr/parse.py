@@ -14,12 +14,14 @@ from typing import Optional, Tuple
 
 MARKER = "BBR_"
 
-_TIME_RE = re.compile(r"\bTime:\s*([\d:.]+)")
-_REMAIN_RE = re.compile(r"\bRemaining:\s*([\d:.]+)")
-_SAMPLE_RE = re.compile(r"\bSample\s+(\d+)\s*/\s*(\d+)")
-_EEVEE_RE = re.compile(r"Rendering\s+(\d+)\s*/\s*(\d+)\s+samples")
+_TIME_RE = re.compile(r"\bTime:\s*([\d:.]+)", re.I)
+_REMAIN_RE = re.compile(r"\bRemaining:\s*([\d:.]+)", re.I)
+_SAMPLE_RE = re.compile(r"\bSamples?:?\s+(\d+)\s*/\s*(\d+)", re.I)
+_EEVEE_RE = re.compile(r"Rendering\s+(\d+)\s*/\s*(\d+)\s+samples", re.I)
 _FRA_RE = re.compile(r"^Fra:\s*(-?\d+)")
 _MEM_RE = re.compile(r"(?:Peak[:\s]+)([\d.]+)\s*([KMG])", re.I)
+_MEMNOW_RE = re.compile(r"\bMem:\s*([\d.]+)\s*([KMG])", re.I)
+_FRAME_WORD_RE = re.compile(r"\b(?:Fra|Frame):\s*(-?\d+)")
 _TILE_RE = re.compile(r"\bTile\s+(\d+)\s*/\s*(\d+)")
 
 
@@ -54,12 +56,19 @@ def _to_mb(value: str, unit: str) -> float:
 
 
 def parse_status(line: str) -> Optional[dict]:
-    """Return a dict with any of: frame, elapsed_s, remaining_s, sample, samples,
-    tile, tiles, peak_mb. None if the line is not a status line."""
+    """Blender's console status line (Blender up to 4.x prints these in background mode)."""
     if not line.startswith("Fra:"):
         return None
+    return parse_stats(line)
+
+
+def parse_stats(line: str) -> dict:
+    """Parse a render-stats string. Returns any of: frame, elapsed_s, remaining_s,
+    sample, samples, tile, tiles, peak_mb, mem_mb. Tolerant of the format changes
+    between Blender versions (Blender 5 no longer prints status lines, so the
+    render script forwards the stats string from inside Blender instead)."""
     out: dict = {}
-    m = _FRA_RE.match(line)
+    m = _FRAME_WORD_RE.search(line)
     if m:
         out["frame"] = int(m.group(1))
     m = _TIME_RE.search(line)
@@ -75,8 +84,11 @@ def parse_status(line: str) -> Optional[dict]:
     if m:
         out["tile"], out["tiles"] = int(m.group(1)), int(m.group(2))
     peaks = [_to_mb(v, u) for v, u in _MEM_RE.findall(line)]
-    if peaks:
-        out["peak_mb"] = max(peaks)
+    mems = [_to_mb(v, u) for v, u in _MEMNOW_RE.findall(line)]
+    if mems:
+        out["mem_mb"] = max(mems)
+    if peaks or mems:
+        out["peak_mb"] = max(peaks + mems)
     return out
 
 

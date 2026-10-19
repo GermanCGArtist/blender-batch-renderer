@@ -8,7 +8,7 @@ import sys
 import bpy
 
 VIDEO_FORMATS = {"FFMPEG", "AVI_JPEG", "AVI_RAW", "H264", "XVID", "THEORA", "QUICKTIME", "FRAMESERVER"}
-_PEAK_RE = re.compile(r"Peak[:\s]+([\d.]+)\s*([KMG])", re.I)
+_PEAK_RE = re.compile(r"(?:Peak|Mem)[:\s]+([\d.]+)\s*([KMG])", re.I)
 
 
 def out(kind, data=None):

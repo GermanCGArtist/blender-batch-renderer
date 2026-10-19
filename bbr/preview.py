@@ -13,7 +13,7 @@ from .storage import atomic_write_json
 
 def build_preview(job, inst, on_line) -> str:
     from .runner import PREVIEW_SCRIPT, env_for
-    done = [r for r in job.done_records() if r.get("file") and os.path.exists(r["file"])]
+    done = [r for r in job.done_records() if os.path.exists(r["path"])]
     if not done:
         raise RuntimeError("no finished frames yet")
     si = job.scene_info or {}
@@ -22,11 +22,11 @@ def build_preview(job, inst, on_line) -> str:
     runs, cur = [], None
     for r in done:
         if cur and r["frame"] == cur["last"] + step:
-            cur["files"].append(os.path.basename(r["file"]))
+            cur["files"].append(os.path.basename(r["path"]))
             cur["last"] = r["frame"]
         else:
-            cur = {"start": r["frame"], "last": r["frame"], "dir": os.path.dirname(r["file"]),
-                   "files": [os.path.basename(r["file"])]}
+            cur = {"start": r["frame"], "last": r["frame"], "dir": os.path.dirname(r["path"]),
+                   "files": [os.path.basename(r["path"])]}
             runs.append(cur)
     pct = (si.get("res_pct") or 100) / 100.0
     w = int((si.get("res_x") or 1920) * pct) // 2 * 2

@@ -180,6 +180,109 @@ q3.remove(q3.jobs[0])
 again = q3.add(jv.blend_path, js())
 check(again.folder == jv.folder and again.count("done") == jv.count("done"), "kept frames from before")
 
+print("9) Blender 5.x style output: live progress + memory come from the stats handler")
+st, q = fresh({"FAKE_NEW_LOG": "1", "FAKE_FRAME_TIME": "0.4", "FAKE_FRAMES": "1-3"})
+j = q.add(make_blend("new_log"), js(make_preview=False))
+seen = {}
+def watch_live(r):
+    if r.live.sample:
+        seen["sample"] = (r.live.sample, r.live.samples, r.live.remaining_s)
+run(st, q, until=watch_live)
+check(j.status == "done", "done")
+check(seen.get("sample") and seen["sample"][1] == 128 and seen["sample"][2] is not None,
+      f"live samples + remaining time seen ({seen.get('sample')})")
+check(j.frames["2"].get("blender_peak_mb") == 202.0, f"memory from stats ({j.frames['2'].get('blender_peak_mb')})")
+
+print("10) restart Blender every 4 frames")
+st, q = fresh({"FAKE_FRAME_TIME": "0.02"})
+j = q.add(make_blend("chunks"), js(make_preview=False, restart_every=4))
+run(st, q)
+check(j.status == "done" and j.count("done") == 10, f"done ({j.status}, {j.count('done')})")
+check(len(j.attempts) == 3 and all(f["attempts"] == 1 for f in j.frames.values()),
+      f"3 Blender runs, no frame charged a failure ({[a['reason'] for a in j.attempts]})")
+
+print("11) disk full while saving -> batch stops, no frame charged")
+st, q = fresh({"FAKE_FRAME_TIME": "0.02", "FAKE_DISK_FULL": "4"})
+j = q.add(make_blend("diskfull"), js(make_preview=False))
+j2 = q.add(make_blend("diskfull_next"), js(make_preview=False))
+run(st, q)
+check(j.status == "stopped" and "disk" in j.status_note, f"stopped: {j.status_note}")
+check(j.count("done") == 3 and "4" not in j.frames, "frames 1-3 kept, frame 4 not counted as failed")
+check(j2.status == "queued", "batch did not continue onto the next job")
+
+print("12) free-space limit -> batch stops before rendering")
+st, q = fresh({"FAKE_FRAME_TIME": "0.02"})
+st.min_free_gb = 10 ** 9
+j = q.add(make_blend("nospace"), js(make_preview=False))
+run(st, q)
+check(j.status == "stopped" and not j.attempts, f"stopped without starting Blender ({j.status_note})")
+
+print("13) .blend saved again mid-job -> on hold; accept -> continues")
+st, q = fresh({"FAKE_FRAME_TIME": "0.1"})
+bp = make_blend("changed")
+j = q.add(bp, js(make_preview=False))
+jn = q.add(make_blend("other"), js(make_preview=False, frame_end=2))
+def stop3(r):
+    if j.count("done") >= 3 and not r.stopping:
+        r.stop_after_frame()
+run(st, q, until=stop3)
+time.sleep(0.05)
+with open(bp, "ab") as f:
+    f.write(b"changed")
+run(st, q)
+check(j.status == "on hold", f"on hold ({j.status}: {j.status_note})")
+check(jn.status == "done", "the next job rendered meanwhile")
+q.accept_changed_blend(j)
+run(st, q)
+check(j.status == "done" and j.count("done") == 10, "continued after accepting")
+
+print("14) missing .blend -> on hold, not failed")
+st, q = fresh({})
+bp = make_blend("gone")
+j = q.add(bp, js(make_preview=False))
+os.remove(bp)
+run(st, q)
+check(j.status == "on hold" and not j.attempts, f"on hold ({j.status_note})")
+
+print("15) render folder moved -> frames still found")
+st, q = fresh({"FAKE_FRAME_TIME": "0.02"})
+j = q.add(make_blend("mover"), js(make_preview=False, render_root=os.path.join(TMP, "r_old")))
+run(st, q)
+newroot = os.path.join(TMP, "r_new")
+shutil.move(os.path.join(TMP, "r_old"), newroot)
+q2 = JobQueue(); w = q2.load()
+check(len(q2.jobs) == 0 and w, "moved folder is reported as missing")
+jm = q2.add_existing(os.path.join(newroot, "mover"))
+check(jm.verify_done_frames() == 0 and jm.count("done") == 10, "all 10 frames found at the new place")
+check(os.path.exists(jm.done_records()[0]["path"]), "frame paths resolve to the new place")
+
+print("16) folders: render order, disabled folder skipped")
+st, q = fresh({"FAKE_FRAME_TIME": "0.01", "FAKE_FRAMES": "1-2"})
+ga = q.add_group("A")
+gb = q.add_group("B")
+jb = q.add(make_blend("in_b"), js(make_preview=False), group=gb["id"])
+ja = q.add(make_blend("in_a"), js(make_preview=False), group=ga["id"])
+jt = q.add(make_blend("top"), js(make_preview=False))
+check([x.name for x in q.ordered_jobs()] == ["top", "in_a", "in_b"], "top level first, then folders in order")
+q.set_order([jt.id], [(gb["id"], [jb.id, ja.id]), (ga["id"], [])])
+check([x.name for x in q.ordered_jobs()] == ["top", "in_b", "in_a"] and ja.group == gb["id"], "drag & drop order applied")
+gb["enabled"] = False; q.save()
+order = []
+st2 = st
+r = Runner(q, st2, lambda k, p: order.append(q.find(p["job_id"]).name) if k == "frame_done" else None)
+r.start(); r.wait(30)
+check(jt.status == "done" and jb.status == "queued" and ja.status == "queued", "disabled folder skipped")
+q3 = JobQueue(); q3.load()
+check([g["name"] for g in q3.groups] == ["B", "A"] and not q3.groups[0]["enabled"], "folders saved")
+
+print("17) only one app instance at a time")
+from bbr.storage import InstanceLock
+l1, l2 = InstanceLock(), InstanceLock()
+check(l1.acquire() and not l2.acquire(), "second instance refused")
+l1.release()
+check(l2.acquire(), "lock free again after release")
+l2.release()
+
 print()
 print("FAILURES:" if failures else "ALL PASSED", *failures, sep="\n  ")
 shutil.rmtree(TMP, ignore_errors=True) if not failures else print("kept", TMP)
