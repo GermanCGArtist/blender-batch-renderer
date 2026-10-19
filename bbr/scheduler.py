@@ -35,6 +35,12 @@ def addon_key(module: str) -> str:
     return module.lower()
 
 
+def device_for(job, machine_name: str) -> str:
+    """'gpu', 'cpu', 'off' or '' (= as saved in the file) for this machine and job."""
+    d = (getattr(job.settings, "devices", None) or {}).get(machine_name, "")
+    return d if d in ("gpu", "cpu", "off") else ""
+
+
 def local_machine_name() -> str:
     n = socket.gethostname().split(".")[0]
     return n or platform.node() or "This computer"
@@ -219,7 +225,7 @@ class Scheduler:
     def lease_local(self, job: Job) -> Optional[int]:
         """Next frame of this job for this computer (None = nothing left for us)."""
         with self.lock:
-            if self.draining or job.id in self.aborted_jobs:
+            if self.draining or job.id in self.aborted_jobs or device_for(job, self.local.name) == "off":
                 return None
             f = self._pick_frame(job, self.local)
             if f is None:
@@ -229,6 +235,8 @@ class Scheduler:
 
     def compatible(self, job: Job, m: Machine) -> Optional[str]:
         """None if the machine can render this job, otherwise the reason why not."""
+        if device_for(job, m.name) == "off":
+            return "switched off for this job"
         pkg = job.package or {}
         if not pkg.get("hash"):
             return "package not built yet"
@@ -269,6 +277,9 @@ class Scheduler:
                 if job.blend_changed():
                     reasons.append(f"{job.name}: the .blend was saved again – decide on the coordinator")
                     continue
+                if device_for(job, m.name) == "off":
+                    reasons.append(f"{job.name}: switched off for this job")
+                    continue
                 pkg = job.package or {}
                 if pkg.get("error") and pkg.get("blend_stamp") == job.current_blend_stamp():
                     reasons.append(f"{job.name}: could not be prepared for other machines")
@@ -299,7 +310,7 @@ class Scheduler:
                     "package": pkg["hash"], "package_size": pkg.get("size"), "blender": pkg.get("blender"),
                     "prefix": job.file_prefix,
                     "overrides": {"frame_start": s.frame_start, "frame_end": s.frame_end, "samples": s.samples,
-                                  "resolution_pct": s.resolution_pct},
+                                  "resolution_pct": s.resolution_pct, "device": device_for(job, m.name)},
                     "frame_timeout_min": s.frame_timeout_min, "restart_every": s.restart_every,
                     "abort_gen": self.abort_gen,
                 }}

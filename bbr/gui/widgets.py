@@ -51,9 +51,13 @@ class OptionalSpin(QWidget):
 class JobSettingsForm(QWidget):
     changed = Signal()
 
-    def __init__(self, installs_provider, show_root: bool = True, show_overrides: bool = True):
+    def __init__(self, installs_provider, show_root: bool = True, show_overrides: bool = True,
+                 machines_provider=None):
         super().__init__()
         self.installs_provider = installs_provider
+        self.machines_provider = machines_provider      # () -> [(name, description)]
+        self._devices = {}
+        self._device_boxes = {}
         form = QFormLayout(self)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
@@ -112,6 +116,14 @@ class JobSettingsForm(QWidget):
                                       "Only for add-ons that don't change the image – otherwise frames from "
                                       "other computers look different.")
         form.addRow("", self.ignore_addons)
+        if machines_provider is not None:
+            self.devices_box = QWidget()
+            self.devices_lay = QFormLayout(self.devices_box)
+            self.devices_lay.setContentsMargins(0, 0, 0, 0)
+            self.devices_box.setToolTip("Cycles only. GPU uses the GPU set in that computer's Blender preferences "
+                                        "(or the first one found). Off = that computer never renders this job.")
+            form.addRow("Device per computer", self.devices_box)
+            self.reload_machines()
         self.reload_installs()
 
     def _browse(self):
@@ -129,6 +141,37 @@ class JobSettingsForm(QWidget):
             i = self.blender.findData(cur)
             if i >= 0:
                 self.blender.setCurrentIndex(i)
+
+    DEVICE_CHOICES = (("As saved in the file", ""), ("GPU", "gpu"), ("CPU", "cpu"), ("Off – not on this computer", "off"))
+
+    def reload_machines(self, keep_choices: bool = True):
+        if self.machines_provider is None:
+            return
+        if keep_choices:
+            self._devices.update(self._read_devices())
+        for _ in range(int(self.devices_lay.rowCount())):
+            self.devices_lay.removeRow(0)
+        self._device_boxes = {}
+        for name, desc in self.machines_provider():
+            cb = QComboBox()
+            for text, val in self.DEVICE_CHOICES:
+                cb.addItem(text, val)
+            i = cb.findData(self._devices.get(name, ""))
+            cb.setCurrentIndex(max(0, i))
+            if desc:
+                cb.setToolTip(desc)
+            self.devices_lay.addRow(name, cb)
+            self._device_boxes[name] = cb
+
+    def _read_devices(self) -> dict:
+        out = {}
+        for name, cb in self._device_boxes.items():
+            v = cb.currentData() or ""
+            if v:
+                out[name] = v
+            else:
+                out.pop(name, None)
+        return out
 
     def set_settings(self, s: JobSettings):
         self.root.setText(s.render_root or "")
@@ -148,6 +191,9 @@ class JobSettingsForm(QWidget):
         self.preflight.setChecked(bool(s.preflight))
         self.restart_every.setValue(int(s.restart_every or 0))
         self.ignore_addons.setChecked(bool(getattr(s, "ignore_addons", False)))
+        self._devices = dict(getattr(s, "devices", None) or {})
+        for name, cb in self._device_boxes.items():
+            cb.setCurrentIndex(max(0, cb.findData(self._devices.get(name, ""))))
 
     def get_settings(self) -> JobSettings:
         return JobSettings(
@@ -158,7 +204,15 @@ class JobSettingsForm(QWidget):
             max_attempts=self.max_attempts.value(), retry_delay_s=self.retry_delay.value(),
             frame_timeout_min=self.timeout.value(), make_preview=self.preview.isChecked(),
             preflight=self.preflight.isChecked(), restart_every=self.restart_every.value(),
-            ignore_addons=self.ignore_addons.isChecked())
+            ignore_addons=self.ignore_addons.isChecked(),
+            devices=self._collect_devices())
+
+    def _collect_devices(self) -> dict:
+        d = dict(self._devices)
+        for name in self._device_boxes:
+            d.pop(name, None)
+        d.update(self._read_devices())
+        return d
 
 
 class Thumbnail(QLabel):

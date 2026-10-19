@@ -342,6 +342,30 @@ check(job.count("done") == 40 and len(os.listdir(job.frames_dir)) == 40, "40 fra
 w.stop()
 c.close()
 
+# ---------------------------------------------------------------------------------
+print("10) device per computer: GPU on the PC, this computer switched off for the job; CPU here for another")
+c = Coordinator(coord_inst, render_locally=True)
+local = c.r.scheduler.local.name
+job = c.add(make_blend("lenskit", "proj"), frame_start=1, frame_end=6)
+job.settings.devices = {local: "off", "GPU PC": "gpu"}
+job2 = c.add(make_blend("bigvram", "proj"), frame_start=1, frame_end=3)
+job2.settings.devices = {local: "cpu", "GPU PC": "off"}
+w = make_worker(c, "GPU PC", fake_exe("blender_gpupc", FAKE_ADDONS="lens_sim:LensSim:1.2.0", FAKE_FRAME_TIME="0.05"))
+w.start()
+wait_for(lambda: w.registered, 20)
+c.r.start()
+check(wait_for(lambda: job.status == "done" and job2.status == "done" and not c.r.running, 90),
+      f"both jobs done ({job.status}, {job2.status})")
+check({r.get("machine") for r in job.frames.values()} == {"GPU PC"}, "job 1 rendered only on the PC")
+check({r.get("machine") for r in job2.frames.values()} == {local}, "job 2 rendered only here")
+log = "\n".join(t for _s, t in w.console_tail)
+check("device=GPU" in log, "the PC was told to use its GPU")
+check("device=CPU" in str((job2.scene_info or {}).get("overrides_applied")), "this computer used the CPU for job 2")
+m = next(m for m in c.r.scheduler.machines.values() if m.name == "GPU PC")
+check(c.r.scheduler.compatible(job2, m) == "switched off for this job", "reason shown for the switched-off computer")
+w.stop()
+c.close()
+
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 if failures:

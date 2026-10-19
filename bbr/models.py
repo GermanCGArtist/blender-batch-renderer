@@ -56,6 +56,7 @@ class JobSettings:
     restart_every: int = 0                # restart Blender every N frames (0 = never)
     machines: List[str] = field(default_factory=list)   # machines allowed to render it ([] = all)
     ignore_addons: bool = False           # workers may render it without the add-ons it seems to use
+    devices: dict = field(default_factory=dict)  # machine name -> "gpu" / "cpu" / "off" (missing = as in the file)
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobSettings":

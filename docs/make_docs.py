@@ -946,6 +946,11 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "do not change the image, tick <i>Other computers don't need this job's add-ons</i> in the job settings.",
         "<b>Render engines.</b> Cycles, EEVEE and Workbench are supported. Cycles uses each worker's own device "
         "preferences (OptiX/CUDA on NVIDIA, Metal on Apple Silicon); the device shows in the Machines tab.",
+        "<b>Device per computer.</b> In a job's settings, choose for each computer <i>As saved in the file</i>, "
+        "<i>GPU</i>, <i>CPU</i> or <i>Off</i>. For example, a scene using an add-on that only works on NVIDIA "
+        "GPUs renders on the PC's GPU and on the Mac's CPU (or is switched off there); a scene that needs more "
+        "VRAM than the PC has renders on the Mac's GPU and is switched off for the PC. <i>GPU</i> uses the GPU set "
+        "in that computer's Blender preferences, or the first one found.",
     ])
     s.append(H2("15.3  Stopping, failures and lost machines"))
     s.append(table([

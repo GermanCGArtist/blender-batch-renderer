@@ -379,7 +379,7 @@ class MainWindow(QMainWindow):
     def _build_settings_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
-        self.job_form = JobSettingsForm(self._installs)
+        self.job_form = JobSettingsForm(self._installs, machines_provider=self._machine_names)
         lay.addWidget(self.job_form)
         row = QHBoxLayout()
         self.l_form_note = QLabel()
@@ -399,6 +399,16 @@ class MainWindow(QMainWindow):
     # ======================================================================
     # helpers
     # ======================================================================
+    def _machine_names(self):
+        """Computers that can render jobs: this one, plus known workers when sharing is on."""
+        sched = self.runner.scheduler
+        out = [(sched.local.name, "this computer")]
+        if self.settings.share_with_workers:
+            for m in sorted(sched.machines.values(), key=lambda m: m.name.lower()):
+                if m.kind == "remote":
+                    out.append((m.name, f"{m.os} · {m.gpu or 'device not known yet'}"))
+        return out
+
     def _installs(self):
         return [BlenderInstall.from_dict(d) for d in self.settings.installs]
 
@@ -565,6 +575,7 @@ class MainWindow(QMainWindow):
             self._reload_console()
             return
         self.job_form.reload_installs()
+        self.job_form.reload_machines(keep_choices=False)
         self.job_form.set_settings(j.settings)
         self._reload_console(j)
         self._refresh_live()

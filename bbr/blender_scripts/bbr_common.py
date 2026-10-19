@@ -69,7 +69,62 @@ def apply_overrides(scene, ov):
             applied.append("eevee samples=%d" % n)
         else:
             warn("Samples override ignored for engine %s" % eng)
+    dev = (ov.get("device") or "").upper()
+    if dev in ("CPU", "GPU"):
+        if scene.render.engine != "CYCLES":
+            warn("Device choice only applies to Cycles (this scene uses %s)" % scene.render.engine)
+        else:
+            if dev == "GPU":
+                note = enable_gpu()
+                if note:
+                    warn(note)
+            scene.cycles.device = dev
+            applied.append("device=%s" % dev)
     return applied
+
+
+GPU_BACKENDS = ("OPTIX", "CUDA", "METAL", "HIP", "ONEAPI")
+
+
+def enable_gpu():
+    """Make sure Cycles has a GPU backend with at least one device switched on (this computer's
+    preferences are used as they are when they already have one). Returns a note or None."""
+    try:
+        prefs = bpy.context.preferences.addons["cycles"].preferences
+    except Exception:
+        return "Cycles preferences not available - using the file's device"
+    try:
+        if hasattr(prefs, "refresh_devices"):
+            prefs.refresh_devices()
+        else:
+            prefs.get_devices()
+    except Exception:
+        pass
+    kind = getattr(prefs, "compute_device_type", "NONE")
+
+    def gpus():
+        return [d for d in prefs.devices if d.type != "CPU"]
+
+    if kind in ("", "NONE") or not gpus():
+        for b in GPU_BACKENDS:
+            try:
+                prefs.compute_device_type = b
+                if hasattr(prefs, "refresh_devices"):
+                    prefs.refresh_devices()
+                else:
+                    prefs.get_devices()
+            except Exception:
+                continue
+            if gpus():
+                kind = b
+                break
+        else:
+            return "No GPU found for Cycles on this computer - rendering on the CPU"
+    if not any(d.use for d in gpus()):
+        for d in gpus():
+            d.use = True
+        return "No GPU was switched on in Blender's preferences - using all %s devices" % kind
+    return None
 
 
 def output_is_video(scene):

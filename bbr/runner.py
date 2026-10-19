@@ -23,7 +23,7 @@ from .models import (AppSettings, Job, RUNNABLE, QUEUED, RENDERING, STOPPED, DON
                      FAILED, CANCELLED, ON_HOLD, F_DONE, F_FAILED, F_PENDING)
 from .parse import parse_marker, parse_status, parse_stats, fmt_bytes
 from .process import BlenderProcess
-from .scheduler import Scheduler, LOCAL_ID
+from .scheduler import Scheduler, LOCAL_ID, device_for
 from .storage import atomic_write_json, free_bytes
 
 DISK_FULL_HINTS = ("No space left", "Errno 28", "disk full", "ENOSPC")
@@ -231,6 +231,8 @@ class Runner:
                 continue
             if j.id in self.scheduler.aborted_jobs:
                 continue
+            if device_for(j, self.scheduler.local.name) == "off" and j.scene_info is not None:
+                continue        # other machines only (frame range is known, nothing to load here)
             free = self.scheduler.leasable(j)
             if free is None or free:
                 return j
@@ -473,7 +475,8 @@ class Runner:
             "dynamic": True,
             "max_frames": int(s.restart_every or 0),
             "overrides": {"frame_start": s.frame_start, "frame_end": s.frame_end,
-                          "samples": s.samples, "resolution_pct": s.resolution_pct},
+                          "samples": s.samples, "resolution_pct": s.resolution_pct,
+                          "device": device_for(job, self.scheduler.local.name)},
         }
         args_path = job.tmp_dir / f"args_{n:03d}.json"
         atomic_write_json(args_path, args)
