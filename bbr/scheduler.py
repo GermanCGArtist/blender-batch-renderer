@@ -26,6 +26,15 @@ OFFLINE_AFTER = 20            # a machine counts as offline after this many seco
 LOCAL_ID = "local"
 
 
+def addon_key(module: str) -> str:
+    """Extensions (Blender 4.2+) are named bl_ext.<repository>.<name>; the same add-on installed from
+    disk on one computer and from a repository on another must still match."""
+    parts = module.split(".")
+    if len(parts) >= 3 and parts[0] == "bl_ext":
+        return parts[-1].lower()
+    return module.lower()
+
+
 def local_machine_name() -> str:
     n = socket.gethostname().split(".")[0]
     return n or platform.node() or "This computer"
@@ -229,8 +238,8 @@ class Scheduler:
         inst = next((i for i in m.installs if i.get("version") == want), None)
         if inst is None:
             return f"needs Blender {want}"
-        have = set((inst.get("addons") or {}).keys())
-        missing = [a for a in (pkg.get("addons_required") or []) if a not in have]
+        have = {addon_key(k) for k in (inst.get("addons") or {})}
+        missing = [a for a in (pkg.get("addons_required") or []) if addon_key(a) not in have]
         if missing:
             names = {a["module"]: a.get("name") or a["module"] for a in pkg.get("addons", [])}
             return "missing add-on(s): " + ", ".join(names.get(a, a) for a in missing)
