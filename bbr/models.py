@@ -55,6 +55,7 @@ class JobSettings:
     preflight: bool = False
     restart_every: int = 0                # restart Blender every N frames (0 = never)
     machines: List[str] = field(default_factory=list)   # machines allowed to render it ([] = all)
+    ignore_addons: bool = False           # workers may render it without the add-ons it seems to use
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobSettings":

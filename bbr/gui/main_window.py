@@ -1393,6 +1393,7 @@ class MainWindow(QMainWindow):
                                     "Remove the job and add the file again with the new folder.")
             new.render_root = old.render_root
         range_changed = (new.frame_start, new.frame_end) != (old.frame_start, old.frame_end)
+        new.machines = list(old.machines or [])
         j.settings = new
         if j.status in (DONE, DONE_ERRORS, CANCELLED, FAILED) and range_changed:
             j.status, j.status_note = QUEUED, "settings changed"

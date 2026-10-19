@@ -107,6 +107,11 @@ class JobSettingsForm(QWidget):
         form.addRow("", self.preview)
         self.preflight = QCheckBox("Check the file first (missing textures, unbaked sims …)")
         form.addRow("", self.preflight)
+        self.ignore_addons = QCheckBox("Other computers don't need this job's add-ons")
+        self.ignore_addons.setToolTip("Workers render this job even without the add-ons it seems to use. "
+                                      "Only for add-ons that don't change the image – otherwise frames from "
+                                      "other computers look different.")
+        form.addRow("", self.ignore_addons)
         self.reload_installs()
 
     def _browse(self):
@@ -142,6 +147,7 @@ class JobSettingsForm(QWidget):
         self.preview.setChecked(bool(s.make_preview))
         self.preflight.setChecked(bool(s.preflight))
         self.restart_every.setValue(int(s.restart_every or 0))
+        self.ignore_addons.setChecked(bool(getattr(s, "ignore_addons", False)))
 
     def get_settings(self) -> JobSettings:
         return JobSettings(
@@ -151,7 +157,8 @@ class JobSettingsForm(QWidget):
             samples=self.samples.value(), resolution_pct=self.res_pct.value(),
             max_attempts=self.max_attempts.value(), retry_delay_s=self.retry_delay.value(),
             frame_timeout_min=self.timeout.value(), make_preview=self.preview.isChecked(),
-            preflight=self.preflight.isChecked(), restart_every=self.restart_every.value())
+            preflight=self.preflight.isChecked(), restart_every=self.restart_every.value(),
+            ignore_addons=self.ignore_addons.isChecked())
 
 
 class Thumbnail(QLabel):

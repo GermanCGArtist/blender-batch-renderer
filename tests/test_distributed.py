@@ -236,6 +236,9 @@ m = next(m for m in c.r.scheduler.machines.values() if m.name == "Laptop")
 check(not any(r.get("machine") == "Laptop" for r in job.frames.values()), "no frames for the worker")
 check("LensSim" in (c.r.scheduler.compatible(job, m) or ""), "reason names the missing add-on")
 check("missing add-on" in bare.note or bare.state == "idle", f"worker shows why it is idle ({bare.note})")
+# the same job with "ignore add-ons": the worker joins in
+job.settings.ignore_addons = True
+check(c.r.scheduler.compatible(job, m) is None, "with 'ignore add-ons' the worker may render the job")
 bare.stop()
 c.close()
 

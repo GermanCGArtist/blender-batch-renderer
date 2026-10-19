@@ -942,7 +942,8 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "deletes its copy once the coordinator confirmed it.",
         "<b>Add-ons and versions.</b> The coordinator detects which add-ons a file uses (from its node groups, "
         "custom properties and render handlers) and gives frames only to workers with the same Blender version "
-        "(major.minor) and those add-ons enabled. The Machines tab shows why a worker gets no frames.",
+        "(major.minor) and those add-ons enabled. The Machines tab shows why a worker gets no frames. If the add-ons "
+        "do not change the image, tick <i>Other computers don't need this job's add-ons</i> in the job settings.",
         "<b>Render engines.</b> Cycles, EEVEE and Workbench are supported. Cycles uses each worker's own device "
         "preferences (OptiX/CUDA on NVIDIA, Metal on Apple Silicon); the device shows in the Machines tab.",
     ])

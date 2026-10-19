@@ -112,7 +112,7 @@ Several computers can render the frames of one animation together, e.g. a Window
   
   Each worker downloads the copy once and keeps it in a cache (*keep up to … GB*). An interrupted download resumes.
 - **Frames.** Workers render one frame at a time and keep Blender open in between, so faster machines simply do more frames. Each finished frame is uploaded right away, and the worker deletes its copy once the coordinator has confirmed it.
-- **Who gets frames.** Frames only go to workers with the same Blender version (major.minor) and the add-ons the file uses. Add-ons are detected from node groups, custom properties and render handlers. The Machines tab says why a worker is idle.
+- **Who gets frames.** Frames only go to workers with the same Blender version (major.minor) and the add-ons the file uses. Add-ons are detected from node groups, custom properties and render handlers. The Machines tab says why a worker is idle. If a job's add-ons don't affect the image, tick *Other computers don't need this job's add-ons* in its job settings.
 - **Engines.** Cycles, EEVEE and Workbench work. Cycles uses each machine's own GPU settings (OptiX/CUDA, Metal).
 - **Stop after frame:** every machine delivers its current frame first. **Stop now** and **Cancel job:** every machine drops its frame, and nothing counts as failed.
 - **A worker vanishes** (sleep, Wi-Fi drop): after 45 s without a heartbeat, its frame goes back to the pool. **A worker crashes on a frame:** the failed attempt is counted against that machine, and the frame is preferably given to another one.

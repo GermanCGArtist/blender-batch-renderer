@@ -159,7 +159,8 @@ class Controller:
             raise ApiError(400, f".blend file not found on this computer: {blend}")
         s = JobSettings.from_dict(self.settings.defaults)
         for k in ("frame_start", "frame_end", "samples", "resolution_pct", "max_attempts", "retry_delay_s",
-                  "frame_timeout_min", "make_preview", "preflight", "restart_every", "blender"):
+                  "frame_timeout_min", "make_preview", "preflight", "restart_every", "blender",
+                  "ignore_addons"):
             if k in data and data[k] is not None:
                 setattr(s, k, data[k])
         gid = ""

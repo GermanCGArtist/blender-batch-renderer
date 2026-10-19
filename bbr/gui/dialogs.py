@@ -220,7 +220,7 @@ class SettingsDialog(QDialog):
         d = self.defaults.get_settings()
         s.defaults.update({k: getattr(d, k) for k in ("render_root", "blender", "max_attempts", "retry_delay_s",
                                                        "frame_timeout_min", "make_preview", "preflight",
-                                                       "restart_every")})
+                                                       "restart_every", "ignore_addons")})
         s.keep_awake = self.keep_awake.isChecked()
         s.auto_resume = self.auto_resume.isChecked()
         s.console_lines = self.console_lines.value()

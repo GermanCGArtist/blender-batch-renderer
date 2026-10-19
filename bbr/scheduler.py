@@ -239,7 +239,8 @@ class Scheduler:
         if inst is None:
             return f"needs Blender {want}"
         have = {addon_key(k) for k in (inst.get("addons") or {})}
-        missing = [a for a in (pkg.get("addons_required") or []) if addon_key(a) not in have]
+        missing = [] if getattr(job.settings, "ignore_addons", False) else \
+            [a for a in (pkg.get("addons_required") or []) if addon_key(a) not in have]
         if missing:
             names = {a["module"]: a.get("name") or a["module"] for a in pkg.get("addons", [])}
             return "missing add-on(s): " + ", ".join(names.get(a, a) for a in missing)
