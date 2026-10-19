@@ -43,7 +43,7 @@ def clock(ts: float) -> str:
 
 class MainWindow(QMainWindow):
 
-    def __init__(self):
+    def __init__(self, first_run: bool = True):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1400, 900)
@@ -77,7 +77,8 @@ class MainWindow(QMainWindow):
 
         for w in load_warnings:
             self._add_message("warn", w)
-        QTimer.singleShot(300, self._first_run)
+        if first_run:
+            QTimer.singleShot(300, self._first_run)
 
     # ======================================================================
     # UI construction

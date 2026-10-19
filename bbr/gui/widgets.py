@@ -4,19 +4,17 @@ from __future__ import annotations
 import os
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QPointF, QMargins, Signal
-from PySide6.QtGui import QPixmap, QPainter, QPalette
+import math
+
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal
+from PySide6.QtGui import QPixmap, QPainter, QPalette, QPen, QColor, QFont, QFontMetrics, QPolygonF
 from PySide6.QtWidgets import (QWidget, QFormLayout, QLineEdit, QPushButton, QHBoxLayout, QComboBox,
                                QCheckBox, QSpinBox, QDoubleSpinBox, QLabel, QFileDialog, QSizePolicy,
                                QVBoxLayout)
 
 from ..models import JobSettings
 
-try:
-    from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
-    HAVE_CHARTS = True
-except ImportError:  # QtCharts is part of the normal PySide6 wheel, but be safe
-    HAVE_CHARTS = False
+SERIES_COLORS = ["#3d8bfd", "#e67e22", "#2fa84f", "#c678dd"]
 
 
 def is_dark(widget: QWidget) -> bool:
@@ -191,59 +189,142 @@ class Thumbnail(QLabel):
                                             Qt.TransformationMode.SmoothTransformation))
 
 
+def _nice_step(span: float, ticks: int = 4) -> float:
+    if span <= 0:
+        return 1.0
+    raw = span / ticks
+    mag = 10 ** math.floor(math.log10(raw))
+    for m in (1, 2, 2.5, 5, 10):
+        if raw <= m * mag:
+            return m * mag
+    return 10 * mag
+
+
+def _fmt(v: float) -> str:
+    if abs(v) >= 1000:
+        return f"{v / 1000:.1f}k".replace(".0k", "k")
+    if v == int(v):
+        return str(int(v))
+    return f"{v:.1f}"
+
+
 class LineChart(QWidget):
-    """A small line chart with one or more series (falls back to a label)."""
+    """A small, self-drawn line chart (no QtCharts needed, which keeps the app small)."""
 
     def __init__(self, title: str, y_title: str, names: List[str]):
         super().__init__()
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        self.title = title
+        self.y_title = y_title
         self.names = names
-        if not HAVE_CHARTS:
-            lay.addWidget(QLabel(f"{title}: charts unavailable (QtCharts missing)"))
-            self.chart = None
-            return
-        self.chart = QChart()
-        self.chart.setTitle(title)
-        self.chart.setMargins(QMargins(4, 4, 4, 4))
-        self.series = []
-        self.ax = QValueAxis()
-        self.ax.setTitleText("frame")
-        self.ax.setLabelFormat("%d")
-        self.ay = QValueAxis()
-        self.ay.setTitleText(y_title)
-        self.chart.addAxis(self.ax, Qt.AlignmentFlag.AlignBottom)
-        self.chart.addAxis(self.ay, Qt.AlignmentFlag.AlignLeft)
-        for n in names:
-            s = QLineSeries()
-            s.setName(n)
-            self.chart.addSeries(s)
-            s.attachAxis(self.ax)
-            s.attachAxis(self.ay)
-            self.series.append(s)
-        self.chart.legend().setVisible(len(names) > 1)
-        view = QChartView(self.chart)
-        view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        view.setMinimumHeight(170)
-        lay.addWidget(view)
-        self.apply_theme()
+        self.xs: List[float] = []
+        self.ys: List[List[Optional[float]]] = [[] for _ in names]
+        self.setMinimumHeight(170)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def apply_theme(self):
-        if self.chart is not None:
-            self.chart.setTheme(QChart.ChartTheme.ChartThemeDark if is_dark(self)
-                                else QChart.ChartTheme.ChartThemeLight)
+        self.update()
 
     def set_data(self, xs: List[float], ys_per_series: List[List[Optional[float]]]):
-        if self.chart is None:
+        self.xs = list(xs)
+        self.ys = [list(y) for y in ys_per_series] + [[] for _ in range(len(self.names) - len(ys_per_series))]
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pal = self.palette()
+        text = pal.color(QPalette.ColorRole.WindowText)
+        bg = pal.color(QPalette.ColorRole.Base)
+        grid = QColor(text)
+        grid.setAlpha(40)
+        muted = QColor(text)
+        muted.setAlpha(150)
+        p.fillRect(self.rect(), bg)
+
+        small = QFont(self.font())
+        small.setPointSizeF(max(8.0, small.pointSizeF() * 0.85))
+        bold = QFont(self.font())
+        bold.setBold(True)
+        fm = QFontMetrics(small)
+        W, H = float(self.width()), float(self.height())
+
+        p.setFont(bold)
+        p.setPen(text)
+        p.drawText(QRectF(8, 4, W - 16, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.title)
+        # legend (top right)
+        p.setFont(small)
+        lx = W - 8
+        if len(self.names) > 1:
+            for i in reversed(range(len(self.names))):
+                name = self.names[i]
+                tw = fm.horizontalAdvance(name)
+                lx -= tw
+                p.setPen(muted)
+                p.drawText(QRectF(lx, 4, tw + 2, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+                lx -= 18
+                p.setPen(QPen(QColor(SERIES_COLORS[i % len(SERIES_COLORS)]), 3))
+                p.drawLine(QPointF(lx, 14), QPointF(lx + 12, 14))
+                lx -= 12
+
+        pts = [(x, y) for ys in self.ys for x, y in zip(self.xs, ys) if y is not None]
+        left, top, right, bottom = 8.0, 30.0, W - 12, H - 24
+        if not pts:
+            p.setPen(muted)
+            p.drawText(QRectF(0, top, W, bottom - top), Qt.AlignmentFlag.AlignCenter, "no finished frames yet")
+            p.end()
             return
-        allx, ally = [], []
-        for s, ys in zip(self.series, ys_per_series):
-            pts = [QPointF(float(x), float(y)) for x, y in zip(xs, ys) if y is not None]
-            s.replace(pts)
-            allx += [p.x() for p in pts]
-            ally += [p.y() for p in pts]
-        if allx:
-            lo, hi = min(allx), max(allx)
-            self.ax.setRange(lo, hi if hi > lo else lo + 1)
-            top = max(ally) if ally else 1
-            self.ay.setRange(0, top * 1.1 if top > 0 else 1)
+
+        x_lo, x_hi = min(x for x, _ in pts), max(x for x, _ in pts)
+        if x_hi == x_lo:
+            x_hi = x_lo + 1
+        y_hi = max(y for _, y in pts) or 1.0
+        step = _nice_step(y_hi)
+        y_top = math.ceil(y_hi * 1.05 / step) * step
+        ticks = [i * step for i in range(int(round(y_top / step)) + 1)]
+        label_w = max(fm.horizontalAdvance(_fmt(t)) for t in ticks)
+        left += label_w + 6
+
+        def X(x):
+            return left + (x - x_lo) / (x_hi - x_lo) * (right - left)
+
+        def Y(y):
+            return bottom - y / y_top * (bottom - top)
+
+        # grid + y labels
+        for t in ticks:
+            y = Y(t)
+            p.setPen(QPen(grid, 1))
+            p.drawLine(QPointF(left, y), QPointF(right, y))
+            p.setPen(muted)
+            p.drawText(QRectF(4, y - 8, label_w + 2, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       _fmt(t))
+        # x labels: first / last frame + axis titles
+        p.setPen(muted)
+        p.drawText(QRectF(left, bottom + 4, 80, 16), Qt.AlignmentFlag.AlignLeft, f"frame {int(x_lo)}")
+        p.drawText(QRectF(right - 80, bottom + 4, 80, 16), Qt.AlignmentFlag.AlignRight, f"{int(x_hi)}")
+        p.drawText(QRectF(left, bottom + 4, right - left, 16), Qt.AlignmentFlag.AlignHCenter, self.y_title)
+
+        # series (gaps where a value is missing)
+        for i, ys in enumerate(self.ys):
+            color = QColor(SERIES_COLORS[i % len(SERIES_COLORS)])
+            p.setPen(QPen(color, 2))
+            seg: List[QPointF] = []
+            pts_i = sorted(((x, y) for x, y in zip(self.xs, ys)), key=lambda t: t[0])
+            for x, y in pts_i + [(None, None)]:
+                if y is None:
+                    if len(seg) > 1:
+                        p.drawPolyline(QPolygonF(seg))
+                    elif len(seg) == 1:
+                        p.setBrush(color)
+                        p.drawEllipse(seg[0], 2.5, 2.5)
+                    seg = []
+                else:
+                    seg.append(QPointF(X(x), Y(y)))
+            if 1 < len(pts_i) <= 60:
+                p.setBrush(color)
+                p.setPen(Qt.PenStyle.NoPen)
+                for x, y in pts_i:
+                    if y is not None:
+                        p.drawEllipse(QPointF(X(x), Y(y)), 2.2, 2.2)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+        p.end()

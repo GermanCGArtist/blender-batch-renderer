@@ -12,6 +12,7 @@ if [ -z "$PY" ]; then
   read -r -p "Press Enter to close"; exit 1
 fi
 echo "Using $PY ($("$PY" --version))"
+rm -rf .venv
 "$PY" -m venv .venv || { read -r -p "Creating the environment failed. Press Enter"; exit 1; }
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt || { read -r -p "Installing packages failed. Press Enter"; exit 1; }

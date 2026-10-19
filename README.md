@@ -7,11 +7,13 @@ This app renders a queue of `.blend` files one after another, for example overni
 **macOS:** double-click `setup.command`. If macOS says it can't be opened, right-click it → Open.
 **Windows:** run `setup.bat`. **Linux:** run `./setup.sh`.
 
-The setup script creates a private Python environment in `.venv` and installs PySide6 (the window), openpyxl (the Excel report), psutil (memory readings) and zstandard (reading compressed .blend files). It needs Python 3.9 or newer.
+The setup script creates a fresh private Python environment in `.venv` (about 0.5 GB) and installs PySide6-Essentials (the window, without the optional Qt add-ons), openpyxl (the Excel report), psutil (memory readings) and zstandard (reading compressed .blend files). It needs Python 3.9 or newer.
 
 ## Start
 
 **macOS app (recommended):** double-click `build_app.command` once. It builds **Blender Batch Renderer.app**, with its own icon and Dock name, next to the script. Drag the app to Applications if you like. Re-run the script after updating the code.
+
+The build leaves out the parts of Qt the app doesn't use (QML/Quick, PDF, networking, OpenGL, SVG, translations …; see `bbr.spec`). It then starts the new app once in the background as a test. If the trimmed app doesn't start, it automatically rebuilds with all of Qt included and says so. Once the app is built, `.venv` is only needed to run `run.command` or to rebuild, so you can delete it to save space; `setup.command` recreates it.
 
 **Without building:** double-click `run.command` (or `run.bat` / `./run.sh`). A Terminal window opens alongside; keep it open while the app runs.
 
