@@ -517,6 +517,11 @@ def build():
                "switched to PNG), the overrides applied, preflight results, every frame that failed or is waiting "
                "for a retry with its last error, and a list of all Blender runs with start time, duration, frames "
                "rendered and result."))
+    s.append(H2("3.4  Machines tab and mode switch"))
+    s.append(P("The <b>Machines</b> tab lists the computers that render with this one, with their state and "
+               "statistics, and switches sharing on or off (chapter 15). The <b>Mode</b> box at the top right of the "
+               "window turns this computer into a <b>worker</b>: the queue is hidden and the window shows the worker "
+               "view instead (15.1). Both are locked while something is rendering."))
 
     # 4 ----------------------------------------------------------------
     s.append(H1("4  Working with the queue"))
@@ -715,6 +720,10 @@ def build():
         ["Restart Blender every", "never", "Fresh Blender process every N frames (6.4)."],
         ["Make an MP4 preview", "on", "Build the preview video when the job finishes."],
         ["Check the file first", "off", "Run the preflight check (chapter 12) before the first render of the job."],
+        ["Other computers don't need this job's add-ons", "off", "Workers render the job even without the add-ons "
+                                                                 "it seems to use (15.2)."],
+        ["Device per computer", "as saved in the file", "For each computer: GPU, CPU, or Off (never renders this "
+                                                        "job). Cycles only (15.2)."],
     ], [44, 30, 96]))
     s.append(H2("9.2  App settings"))
     s.append(table([
@@ -730,6 +739,11 @@ def build():
         ["Allow other devices on my home network", "off", "Makes the status page reachable from phones and other "
                                                            "computers at home; they need the key."],
         ["Key for other devices", "random", "Part of the link for other devices; <i>New key</i> locks out old links."],
+        ["Mode (top right)", "Coordinator", "Coordinator keeps the queue; Worker renders for a coordinator (15)."],
+        ["Share jobs with worker computers", "off", "Machines tab: other computers may render frames of the queue."],
+        ["This computer renders too", "on", "Machines tab: off = the coordinator only hands out frames."],
+        ["Pairing code", "random", "Machines tab: 6 digits a new worker enters once; <i>New code</i> for new workers."],
+        ["Worker: keep downloaded jobs up to", "50 GB", "Worker window: size of the cache of job copies (15.6)."],
     ], [52, 34, 84]))
     s.append(H2("9.3  What the app changes in your file"))
     s.append(P("Only in the background Blender session – <b>the .blend file itself is never saved or modified</b>:"))
@@ -782,8 +796,9 @@ def build():
                "<font face='Mono'>%APPDATA%\\BlenderBatchRenderer</font>; Linux: "
                "<font face='Mono'>~/.local/share/BlenderBatchRenderer</font>. It contains "
                "<font face='Mono'>settings.json</font> (installs and defaults), <font face='Mono'>queue.json</font> "
-               "(folders and the order of job folders) and <font face='Mono'>app.lock</font>. Everything about a "
-               "job lives in its own job folder."))
+               "(folders and the order of job folders) and <font face='Mono'>app.lock</font>. On a worker it also "
+               "holds <font face='Mono'>worker_cache/</font> (downloaded job copies) and "
+               "<font face='Mono'>worker_logs/</font> (15.6). Everything about a job lives in its own job folder."))
 
     # 11 ---------------------------------------------------------------
     s.append(H1("11  Preview video"))
@@ -987,6 +1002,20 @@ curl -X POST -H "X-BBR-Request: 1" \\
                "Without that key, nothing can be downloaded or uploaded. The status page still needs its own key for "
                "other devices. Use the app only on networks you trust; for working away from home use a VPN such "
                "as Tailscale."))
+    s.append(H2("15.6  Where the files are"))
+    s.append(table([
+        ["What", "Where"],
+        ["Job copy on the coordinator", "<font face='Mono'>&lt;job folder&gt;/package/&lt;code&gt;.zip</font> – rebuilt "
+                                        "when the .blend is saved again; can be deleted after the job."],
+        ["Job copies on a worker", "<font face='Mono'>worker_cache/&lt;code&gt;/</font> in the app data folder (10.3): "
+                                   "main.blend, libs/, files/. The oldest are removed when the size limit is reached; "
+                                   "<i>Clear</i> empties it."],
+        ["Frames on their way", "<font face='Mono'>worker_cache/work/&lt;job&gt;/</font> – deleted once the coordinator "
+                                "has confirmed each frame."],
+        ["Worker crash logs", "<font face='Mono'>worker_logs/</font> in the app data folder."],
+        ["Known workers", "<font face='Mono'>settings.json</font> on the coordinator – listed (offline) after a "
+                          "restart until they connect again."],
+    ], [46, 124]))
 
     # 16 ---------------------------------------------------------------
     s.append(PageBreak())
