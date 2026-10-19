@@ -881,6 +881,10 @@ class MainWindow(QMainWindow):
             self.worker_view.addons_done()
             return
         if kind == "machines":
+            names = tuple(n for n, _ in self._machine_names())
+            if names != getattr(self, "_machine_names_shown", None):
+                self._machine_names_shown = names
+                self.job_form.reload_machines(keep_choices=True)
             if self.tabs.currentWidget() is self.machines_panel and time.time() - self._machines_last > 0.5:
                 self._machines_last = time.time()
                 self.machines_panel.refresh()

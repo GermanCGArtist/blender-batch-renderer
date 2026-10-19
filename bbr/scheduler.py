@@ -109,6 +109,15 @@ class Scheduler:
         self.local = Machine(id=LOCAL_ID, name=local_machine_name(), kind="local",
                              os=f"{platform.system()} {platform.release()}", last_seen=time.time())
         self.machines[LOCAL_ID] = self.local
+        # workers known from earlier sessions: listed (offline) until they connect again
+        for mid, d in list((settings.machines or {}).items()):
+            if not isinstance(d, dict) or mid == LOCAL_ID:
+                continue
+            m = Machine(id=mid, name=str(d.get("name") or mid), os=d.get("os", ""), gpu=d.get("gpu", ""),
+                        installs=list(d.get("installs") or []), enabled=d.get("enabled", True),
+                        state="offline", last_seen=0.0)
+            m.total.update(d.get("total") or {})
+            self.machines[mid] = m
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._expire_loop, name="bbr-leases", daemon=True)
         self._thread.start()
@@ -525,7 +534,8 @@ class Scheduler:
         try:
             with self.lock:
                 self.settings.machines = {
-                    mid: {"name": m.name, "enabled": m.enabled, "total": dict(m.total)}
+                    mid: {"name": m.name, "enabled": m.enabled, "total": dict(m.total), "os": m.os, "gpu": m.gpu,
+                          "installs": m.installs}
                     for mid, m in self.machines.items() if m.kind == "remote"}
             self.settings.save()
         except Exception:
