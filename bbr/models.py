@@ -67,9 +67,17 @@ class AppSettings:
     defaults: dict = field(default_factory=lambda: asdict(JobSettings()))
     keep_awake: bool = True
     auto_resume: bool = False
-    last_render_root: str = ""
+    last_render_root: str = ""            # only used as the start folder of "Browse…" dialogs
+    last_blend_dir: str = ""              # start folder of the "Add .blend…" dialog
     console_lines: int = 5000
     min_free_gb: float = 5.0              # stop the batch when the render disk gets this full
+    current_queue_file: str = ""          # the .bbrqueue file the queue was last opened from / saved to
+    recent_queue_files: List[str] = field(default_factory=list)
+    api_enabled: bool = True              # local web API + status page
+    api_port: int = 8642
+    api_allow_lan: bool = False           # also reachable from other devices on the home network
+    api_key: str = ""                     # needed for access from other devices
+    settings_version: int = 1
 
     @property
     def path(self) -> Path:
@@ -83,7 +91,29 @@ class AppSettings:
         base = asdict(JobSettings())
         base.update(s.defaults or {})
         s.defaults = base
+        changed = False
+        if s.settings_version < 2:
+            # v2: the default render folder is a "render" folder next to each .blend file
+            s.defaults["render_root"] = ""
+            s.settings_version = 2
+            changed = True
+        if not s.api_key:
+            import secrets
+            s.api_key = secrets.token_urlsafe(18)
+            changed = True
+        if changed:
+            try:
+                s.save()
+            except OSError:
+                pass
+        if os.environ.get("BBR_API_PORT"):          # used by the build self-test
+            s.api_port = int(os.environ["BBR_API_PORT"])
         return s
+
+    def add_recent(self, path: str) -> None:
+        path = os.path.abspath(path)
+        self.recent_queue_files = [path] + [p for p in self.recent_queue_files if p != path]
+        self.recent_queue_files = self.recent_queue_files[:10]
 
     def save(self) -> None:
         atomic_write_json(self.path, asdict(self))

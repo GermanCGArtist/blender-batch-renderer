@@ -3,27 +3,59 @@ import sys
 from pathlib import Path
 
 ICON = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
+QUEUE_EXT = ".bbrqueue"
+
+
+def _queue_args(argv):
+    return [a for a in argv[1:] if a.lower().endswith(QUEUE_EXT) and os.path.isfile(a)]
 
 
 def main() -> int:
     try:
+        from PySide6.QtCore import QEvent, QTimer
         from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QApplication, QMessageBox
     except ImportError:
         print("PySide6 is not installed. Run the setup script first (setup.command / setup.bat / setup.sh).")
         return 1
     from .. import APP_NAME
+    from ..models import AppSettings
     from ..storage import InstanceLock
 
-    app = QApplication(sys.argv)
+    class App(QApplication):
+        """Receives macOS 'open this file' events (double-click on a .bbrqueue)."""
+
+        def __init__(self, argv):
+            super().__init__(argv)
+            self.pending = []
+            self.window = None
+
+        def event(self, e):
+            if e.type() == QEvent.Type.FileOpen:
+                path = e.file()
+                if path.lower().endswith(QUEUE_EXT):
+                    if self.window is not None:
+                        self.window.open_queue_file(path)
+                    else:
+                        self.pending.append(path)
+                return True
+            return super().event(e)
+
+    app = App(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
     app.setOrganizationName("BlenderBatchRenderer")
     if ICON.exists():
         app.setWindowIcon(QIcon(str(ICON)))
 
+    files = _queue_args(sys.argv)
     lock = InstanceLock()
     if not lock.acquire():
+        # Another copy is running (Windows/Linux double-click): hand the file over to it.
+        if files:
+            from ..api import forward_to_running_app
+            if forward_to_running_app(AppSettings.load(), files[0]):
+                return 0
         QMessageBox.information(None, APP_NAME, f"{APP_NAME} is already running.\n\n"
                                 "Only one window can work on the queue at a time.")
         return 0
@@ -31,12 +63,14 @@ def main() -> int:
     from .main_window import MainWindow
     smoke = os.environ.get("BBR_SMOKE_TEST") == "1"   # used by build_app.command
     w = MainWindow(first_run=not smoke)
+    app.window = w
     w.show()
+    for path in files + app.pending:
+        QTimer.singleShot(0, lambda p=path: w.open_queue_file(p))
+    app.pending = []
     if smoke:
-        from PySide6.QtCore import QTimer
-
         def done():
-            # exercise the parts that load extra code: charts, thumbnail, Excel report
+            # exercise the parts that load extra code: charts, thumbnail, Excel report, API
             w._load_selected()
             w._tick()
             w.chart_time.set_data([1, 2, 3, 5], [[1.0, 2.5, 1.5, 2.0]])
@@ -52,7 +86,12 @@ def main() -> int:
                     name="smoke")
             j.frames = {str(i): {"status": "done", "render_s": 1.0 + i, "size": 1000} for i in range(1, 4)}
             ok = write_xlsx(j)
-            print("SMOKE TEST OK" if ok else "SMOKE TEST: report failed", flush=True)
+            api_ok = w.api.running
+            qf = os.path.join(os.environ.get("BBR_DATA_DIR", "."), "smoke" + QUEUE_EXT)
+            w.queue.save_file(qf)
+            print("SMOKE TEST OK" if ok and api_ok else f"SMOKE TEST: report={ok} api={api_ok} {w.api.error}",
+                  flush=True)
+            w.api.stop()
             app.quit()
         QTimer.singleShot(1500, done)
     try:

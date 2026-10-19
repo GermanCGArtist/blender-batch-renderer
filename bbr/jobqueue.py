@@ -19,6 +19,10 @@ from .models import (Job, JobSettings, QUEUED, RENDERING, STOPPED, DONE, DONE_ER
 from .storage import app_data_dir, atomic_write_json, read_json
 
 
+QUEUE_FORMAT = "bbr-queue"
+QUEUE_EXT = ".bbrqueue"
+
+
 def _safe_name(s: str) -> str:
     s = re.sub(r"[^\w.\- ]+", "_", s).strip().replace(" ", "_")
     return s or "job"
@@ -30,6 +34,7 @@ class JobQueue:
         self.jobs: List[Job] = []
         self.groups: List[dict] = []     # {"id", "name", "enabled", "expanded", "render_root"}
         self.lock = threading.RLock()
+        self.on_change = None            # called after every change of the queue's structure
 
     # ---- persistence -----------------------------------------------------
     def load(self) -> List[str]:
@@ -57,6 +62,86 @@ class JobQueue:
     def save(self) -> None:
         with self.lock:
             atomic_write_json(self.path, {"groups": self.groups, "jobs": [j.folder for j in self.jobs]})
+        if self.on_change:
+            try:
+                self.on_change()
+            except Exception:
+                pass
+
+    # ---- queue files (.bbrqueue) -------------------------------------------
+    def snapshot(self) -> dict:
+        """What a queue file stores: folders, job folders in order, on/off switches.
+        Used to save, and to tell whether the queue differs from the saved file."""
+        with self.lock:
+            return {
+                "groups": [{k: g.get(k) for k in ("id", "name", "enabled", "render_root")} for g in self.groups],
+                "jobs": [{"folder": os.path.abspath(j.folder), "group": j.group or "", "enabled": bool(j.enabled)}
+                         for j in self.jobs],
+            }
+
+    def save_file(self, path: str) -> None:
+        path = os.path.abspath(path)
+        snap = self.snapshot()
+        base = os.path.dirname(path)
+        for e in snap["jobs"]:
+            try:
+                e["rel"] = os.path.relpath(e["folder"], base)
+            except ValueError:          # different drive on Windows
+                e["rel"] = None
+        data = {"format": QUEUE_FORMAT, "version": 1, "app": "Blender Batch Renderer",
+                "groups": [dict(g, expanded=next((x.get("expanded", True) for x in self.groups
+                                                  if x["id"] == g["id"]), True)) for g in snap["groups"]],
+                "jobs": snap["jobs"]}
+        atomic_write_json(path, data)
+
+    @staticmethod
+    def read_file_snapshot(path: str) -> Optional[dict]:
+        """The snapshot stored in a queue file (job folders resolved), or None."""
+        d = read_json(path)
+        if not d or d.get("format") != QUEUE_FORMAT:
+            return None
+        base = os.path.dirname(os.path.abspath(path))
+        jobs = []
+        for e in d.get("jobs", []):
+            folder = e.get("folder") or ""
+            if not os.path.exists(os.path.join(folder, "job.json")) and e.get("rel"):
+                alt = os.path.normpath(os.path.join(base, e["rel"]))
+                if os.path.exists(os.path.join(alt, "job.json")):
+                    folder = alt         # queue file and render folders were moved together
+            jobs.append({"folder": os.path.abspath(folder) if folder else folder,
+                         "group": e.get("group", ""), "enabled": bool(e.get("enabled", True))})
+        groups = [{k: g.get(k) for k in ("id", "name", "enabled", "render_root")} for g in d.get("groups", [])]
+        return {"groups": groups, "jobs": jobs, "_expanded": {g.get("id"): g.get("expanded", True)
+                                                           for g in d.get("groups", [])}}
+
+    def load_file(self, path: str) -> List[str]:
+        """Replace the queue with the contents of a queue file. Returns warnings."""
+        snap = self.read_file_snapshot(path)
+        if snap is None:
+            raise ValueError("Not a Blender Batch Renderer queue file")
+        warnings = []
+        with self.lock:
+            self.groups = [dict(g, expanded=snap["_expanded"].get(g["id"], True)) for g in snap["groups"]]
+            self.jobs = []
+            for e in snap["jobs"]:
+                j = Job.load(e["folder"])
+                if j is None:
+                    warnings.append(f"Job folder not found: {e['folder']}")
+                    continue
+                if j.status == RENDERING:
+                    j.status, j.status_note = STOPPED, "interrupted (app was closed)"
+                j.group = e["group"] if self.group(e["group"]) else ""
+                j.enabled = e["enabled"]
+                j.save()
+                self.jobs.append(j)
+        self.save()
+        return warnings
+
+    def clear(self) -> None:
+        """Empty queue (job folders stay on disk)."""
+        with self.lock:
+            self.jobs, self.groups = [], []
+        self.save()
 
     def save_job(self, job: Job) -> None:
         with self.lock:
@@ -226,6 +311,18 @@ class JobQueue:
             self.jobs.remove(job)
             self.jobs.append(job)
             job.save()
+            self.save()
+
+    def set_enabled(self, job: Job, enabled: bool) -> None:
+        with self.lock:
+            job.enabled = bool(enabled)
+            job.save()
+        self.save()
+
+    def set_group_enabled(self, gid: str, enabled: bool) -> None:
+        g = self.group(gid)
+        if g:
+            g["enabled"] = bool(enabled)
             self.save()
 
     def reset_job(self, job: Job, keep_frames: bool = True) -> None:

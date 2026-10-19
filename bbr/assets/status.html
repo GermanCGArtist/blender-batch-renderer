@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Batch Renderer – Status</title>
+<link rel="icon" href="/icon.png">
+<link rel="apple-touch-icon" href="/icon.png">
+<style>
+  :root {
+    --bg: #f4f5f9; --card: #ffffff; --ink: #1f2430; --muted: #5b6275; --line: #e1e4ec;
+    --accent: #f07a4a; --accent2: #e9466f; --blue: #3d8bfd; --ok: #2fa84f; --warn: #d39e00;
+    --bad: #dc3545; --hold: #a855c7; --track: #eceef4; --navy: #1c2340;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #12162a; --card: #1b2038; --ink: #e8eaf2; --muted: #9aa1b8; --line: #2b3150;
+            --track: #2a3050; --navy: #0d1020; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { background: var(--navy); color: #fff; padding: 14px 16px; display: flex; align-items: center; gap: 12px;
+           flex-wrap: wrap; }
+  header img { width: 36px; height: 36px; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header .sub { color: #c9cfe6; font-size: 13px; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 12px; font-weight: 600;
+          background: #3a4268; color: #fff; }
+  .pill.run { background: var(--blue); } .pill.stop { background: var(--warn); color: #000; }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+             margin: 0 0 10px; font-weight: 600; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-start; }
+  .grow { flex: 1 1 260px; min-width: 0; }
+  .big { font-size: 22px; font-weight: 650; }
+  .muted { color: var(--muted); }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 14px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  .bar { height: 8px; background: var(--track); border-radius: 99px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2));
+             border-radius: 99px; transition: width .4s; }
+  .thumb { width: 100%; max-width: 320px; border-radius: 8px; border: 1px solid var(--line); display: block;
+           background: var(--track); aspect-ratio: 16/9; object-fit: contain; }
+  button { font: inherit; font-size: 14px; border-radius: 8px; border: 1px solid var(--line); padding: 7px 12px;
+           background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .folder { margin: 12px 0 4px; font-weight: 650; display: flex; gap: 8px; align-items: baseline; }
+  .job { display: grid; grid-template-columns: 1fr 120px; gap: 4px 12px; padding: 9px 0;
+         border-top: 1px solid var(--line); }
+  .job:first-of-type { border-top: 0; }
+  .job .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job .meta { font-size: 13px; color: var(--muted); }
+  .job .right { text-align: right; font-size: 13px; }
+  .job.off { opacity: .5; }
+  .st { font-size: 12px; font-weight: 650; }
+  .st.rendering { color: var(--blue); } .st.done { color: var(--ok); } .st.failed { color: var(--bad); }
+  .st.stopped, .st.queued { color: var(--muted); } .st.hold { color: var(--hold); } .st.warn { color: var(--warn); }
+  pre { margin: 0; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap;
+        word-break: break-all; max-height: 320px; overflow: auto; color: var(--muted); }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; text-transform: uppercase;
+                    letter-spacing: .06em; font-weight: 600; }
+  a { color: var(--accent); }
+  .thumb:not([src]) { display: none; }
+  #err { display: none; background: var(--bad); color: #fff; padding: 8px 16px; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <img src="/icon.png" alt="">
+  <div>
+    <h1>Blender Batch Renderer <span id="state" class="pill">…</span></h1>
+    <div class="sub" id="summary">connecting…</div>
+  </div>
+  <div class="controls">
+    <button class="primary" id="b-start">▶ Start</button>
+    <button id="b-after">Stop after frame</button>
+    <button id="b-now">■ Stop now</button>
+  </div>
+</header>
+<div id="err"></div>
+<main>
+  <section class="card" id="live-card">
+    <h2>Rendering now</h2>
+    <div class="row">
+      <div class="grow">
+        <div class="big" id="l-title">–</div>
+        <div class="muted" id="l-phase"></div>
+        <div style="margin:10px 0 4px" class="bar"><i id="l-bar"></i></div>
+        <div class="muted" id="l-bartext" style="font-size:13px"></div>
+        <div class="kv" style="margin-top:10px">
+          <div>Frame remaining</div><div id="l-rem">–</div>
+          <div>Job remaining</div><div id="l-jobeta">–</div>
+          <div>Memory</div><div id="l-mem">–</div>
+        </div>
+      </div>
+      <div><img class="thumb" id="l-thumb" alt=""></div>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Queue</h2>
+    <div id="queue"></div>
+  </section>
+  <section class="card">
+    <details id="cons"><summary>Blender console</summary><pre id="console"></pre></details>
+  </section>
+</main>
+<script>
+const params = new URLSearchParams(location.search);
+const KEY = params.get("key") || "";
+const H = {"X-BBR-Request": "1", "Content-Type": "application/json"};
+if (KEY) H["X-API-Key"] = KEY;
+const $ = id => document.getElementById(id);
+let lastFrameShown = null, consoleSeq = 0, currentJob = null;
+
+function fmt(s) {
+  if (s == null) return "–";
+  s = Math.round(s); const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600),
+  m = Math.floor(s % 3600 / 60), x = s % 60;
+  if (d) return `${d}d ${h}h ${String(m).padStart(2,"0")}m`;
+  if (h) return `${h}h ${String(m).padStart(2,"0")}m`;
+  if (m) return `${m}m ${String(x).padStart(2,"0")}s`;
+  return `${x}s`;
+}
+function clock(t) {
+  if (!t) return "";
+  const d = new Date(t * 1000), now = new Date();
+  const hm = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  return d.toDateString() === now.toDateString() ? hm : d.toLocaleDateString([], {weekday: "short"}) + " " + hm;
+}
+function mb(x) { return x == null ? "–" : (x >= 1024 ? (x / 1024).toFixed(1) + " GB" : Math.round(x) + " MB"); }
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function stClass(s) {
+  if (s.startsWith("rendering")) return "rendering"; if (s.startsWith("done (")) return "warn";
+  if (s === "done") return "done"; if (s === "failed" || s === "cancelled") return "failed";
+  if (s === "on hold") return "hold"; return "queued";
+}
+async function api(path, opts = {}) {
+  const r = await fetch(path, {headers: H, ...opts});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+function showErr(msg) { const e = $("err"); e.textContent = msg; e.style.display = msg ? "block" : "none"; }
+
+async function control(path, body) {
+  try { await api(path, {method: "POST", body: JSON.stringify(body || {})}); refresh(); }
+  catch (e) { showErr(e.message); }
+}
+$("b-start").onclick = () => control("/api/v1/batch/start");
+$("b-after").onclick = () => control("/api/v1/batch/stop", {mode: "after_frame"});
+$("b-now").onclick = () => { if (confirm("Stop now? The current frame will be rendered again next time."))
+                               control("/api/v1/batch/stop", {mode: "now"}); };
+
+function renderQueue(q) {
+  const byFolder = {};
+  for (const j of q.jobs) { const k = j.folder ? j.folder.id : ""; (byFolder[k] = byFolder[k] || []).push(j); }
+  const parts = [];
+  const block = (title, jobs, enabled) => {
+    if (title) parts.push(`<div class="folder">${esc(title)} <span class="muted" style="font-weight:400;font-size:13px">${jobs.length} job(s)${enabled ? "" : " · skipped"}</span></div>`);
+    for (const j of jobs) {
+      const p = j.progress == null ? 0 : j.progress * 100;
+      const fr = j.frames.total == null ? `${j.frames.done} / ?` : `${j.frames.done}${j.frames.failed ? " +" + j.frames.failed + " failed" : ""} / ${j.frames.total}`;
+      const eta = j.status === "done" || j.status.startsWith("done (") ? "done" : (j.eta_s != null ? fmt(j.eta_s) : "");
+      const retry = (j.frames.failed || ["failed","cancelled","on hold"].includes(j.status)) && !j.rendering
+        ? ` · <a href="#" data-retry="${j.id}">retry</a>` : "";
+      parts.push(`<div class="job${j.active ? "" : " off"}">
+        <div><div class="name">${esc(j.name)}</div>
+             <div class="meta"><span class="st ${stClass(j.status)}">${esc(j.status)}</span>${j.note ? " · " + esc(j.note) : ""}${retry}</div></div>
+        <div class="right">${fr}<br><span class="muted">${eta}</span></div>
+        <div class="bar" style="grid-column:1/3"><i style="width:${p.toFixed(1)}%"></i></div></div>`);
+    }
+  };
+  block("", byFolder[""] || [], true);
+  for (const f of q.folders) block(f.name, byFolder[f.id] || [], f.enabled);
+  if (!q.jobs.length) parts.push('<div class="muted">The queue is empty.</div>');
+  $("queue").innerHTML = parts.join("");
+  for (const a of document.querySelectorAll("[data-retry]"))
+    a.onclick = ev => { ev.preventDefault(); control(`/api/v1/jobs/${a.dataset.retry}/retry`); };
+}
+
+async function refresh() {
+  try {
+    const [s, q] = await Promise.all([api("/api/v1/status"), api("/api/v1/queue")]);
+    showErr("");
+    const st = $("state");
+    st.textContent = s.running ? (s.stopping ? "stopping…" : "rendering") : "idle";
+    st.className = "pill" + (s.running ? (s.stopping ? " stop" : " run") : "");
+    let sum = `${s.batch.jobs_done}/${s.batch.jobs} jobs done`;
+    if (s.batch.eta_s) sum += ` · remaining ≈ ${fmt(s.batch.eta_s)} (done ≈ ${clock(s.batch.finishes_at)})`;
+    if (s.batch.jobs_without_estimate) sum += ` · +${s.batch.jobs_without_estimate} job(s) without estimate`;
+    $("summary").textContent = sum;
+    $("b-start").disabled = s.running;
+    $("b-after").disabled = !s.running || s.stopping;
+    $("b-now").disabled = !s.running;
+    const L = s.live;
+    const cj = L ? q.jobs.find(j => j.id === L.job_id) : null;
+    currentJob = L ? L.job_id : null;
+    $("live-card").style.display = L ? "" : "none";
+    if (L) {
+      $("l-title").textContent = L.frame != null ? `${L.job} – frame ${L.frame}` : L.job;
+      $("l-phase").textContent = L.frame != null ? "" : ({loading: "loading file / preparing frame", preflight: "checking file",
+        preview: "encoding preview", waiting: "waiting before retry"}[L.phase] || L.phase || "");
+      $("l-bar").style.width = ((L.frame_fraction || 0) * 100).toFixed(1) + "%";
+      $("l-bartext").textContent = L.samples ? `sample ${L.sample} / ${L.samples}` : "";
+      $("l-rem").textContent = fmt(L.frame_remaining_s);
+      $("l-jobeta").textContent = cj && cj.eta_s != null ? `${fmt(cj.eta_s)} (done ≈ ${clock(Date.now()/1000 + cj.eta_s)})` : "–";
+      $("l-mem").textContent = `${mb(L.memory_mb)} (Blender peak ${mb(L.blender_peak_mb)})`;
+      if (cj && cj.last_frame != null && cj.last_frame !== lastFrameShown) {
+        lastFrameShown = cj.last_frame;
+        $("l-thumb").src = `/api/v1/jobs/${cj.id}/thumbnail?f=${cj.last_frame}${KEY ? "&key=" + encodeURIComponent(KEY) : ""}`;
+      }
+    }
+    renderQueue(q);
+    if ($("cons").open) {
+      const c = await api(`/api/v1/console?since=${consoleSeq}`);
+      if (c.lines.length) {
+        const pre = $("console"), atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+        pre.textContent = (pre.textContent + "\n" + c.lines.map(l => l.text).join("\n")).split("\n").slice(-400).join("\n");
+        if (atEnd) pre.scrollTop = pre.scrollHeight;
+      }
+      consoleSeq = c.last_seq;
+    }
+  } catch (e) { showErr("Cannot reach the app: " + e.message); }
+}
+$("l-thumb").onerror = function () { this.removeAttribute("src"); };
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

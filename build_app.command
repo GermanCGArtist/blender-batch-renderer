@@ -16,7 +16,7 @@ build() {
 smoke_test() {
   # starts the app with an empty test queue and closes it after a moment
   local tmp; tmp=$(mktemp -d)
-  BBR_SMOKE_TEST=1 BBR_DATA_DIR="$tmp" "dist/$APP.app/Contents/MacOS/$APP" > "$tmp/out.txt" 2>&1
+  BBR_SMOKE_TEST=1 BBR_API_PORT=0 BBR_DATA_DIR="$tmp" "dist/$APP.app/Contents/MacOS/$APP" > "$tmp/out.txt" 2>&1
   local rc=$?
   if [ $rc -ne 0 ] || ! grep -q "SMOKE TEST OK" "$tmp/out.txt" || grep -q "Traceback" "$tmp/out.txt"; then
     echo "--- app output ---"; tail -20 "$tmp/out.txt"; echo "------------------"

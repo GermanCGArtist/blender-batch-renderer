@@ -36,7 +36,10 @@ def keep(entry):
 a = Analysis(
     ["bbr_app.py"],
     pathex=["."],
-    datas=[("bbr/blender_scripts", "bbr/blender_scripts"), ("bbr/assets", "bbr/assets")],
+    datas=[("bbr/blender_scripts", "bbr/blender_scripts"), ("bbr/assets", "bbr/assets"),
+           ("blender_addon", "blender_addon")]
+          + ([("docs/Blender_Batch_Renderer_Documentation.pdf", "docs")]
+             if os.path.exists("docs/Blender_Batch_Renderer_Documentation.pdf") else []),
     excludes=EXCLUDES,
     noarchive=False,
 )
@@ -57,7 +60,22 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": APP,
         "CFBundleDisplayName": APP,
-        "CFBundleShortVersionString": "0.2.0",
+        "CFBundleShortVersionString": "0.3.0",
+        # double-clicking a .bbrqueue file opens it in the app
+        "CFBundleDocumentTypes": [{
+            "CFBundleTypeName": "Batch Renderer Queue",
+            "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Owner",
+            "CFBundleTypeIconFile": "icon.icns",
+            "LSItemContentTypes": ["io.github.germancgartist.blenderbatchrenderer.queue"],
+        }],
+        "UTExportedTypeDeclarations": [{
+            "UTTypeIdentifier": "io.github.germancgartist.blenderbatchrenderer.queue",
+            "UTTypeDescription": "Batch Renderer Queue",
+            "UTTypeConformsTo": ["public.json", "public.data"],
+            "UTTypeIconFile": "icon.icns",
+            "UTTypeTagSpecification": {"public.filename-extension": ["bbrqueue"]},
+        }],
         "NSHighResolutionCapable": True,
         "LSApplicationCategoryType": "public.app-category.graphics-design",
     },

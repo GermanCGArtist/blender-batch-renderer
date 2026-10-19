@@ -96,10 +96,21 @@ def main(argv=None):
                       f"ETA {fmt_duration(j.eta_seconds())}")
 
         r = Runner(q, settings, emit)
+        api = None
+        if settings.api_enabled:
+            from .api import ApiServer, DirectExecutor
+            from .control import Controller
+            api = ApiServer(Controller(q, r, settings), DirectExecutor(), settings)
+            if api.start():
+                print(f"status page: {api.url}")
+            else:
+                print(f"API not started: {api.error}")
         signal.signal(signal.SIGINT, lambda *a: r.stop_now())
         r.start()
         while r.running:
             r.wait(0.5)
+        if api:
+            api.stop()
         return 0
 
 

@@ -17,13 +17,13 @@ The build leaves out the parts of Qt the app doesn't use (QML/Quick, PDF, networ
 
 **Without building:** double-click `run.command` (or `run.bat` / `./run.sh`). A Terminal window opens alongside; keep it open while the app runs.
 
-Only one copy of the app can run at a time. A second copy refuses to start instead of rendering the same queue twice.
+Only one copy of the app can run at a time. A second copy refuses to start instead of rendering the same queue twice. If you double-click a queue file while the app is already running, the running app opens it.
 
 On first launch the app looks for Blender installs in `/Applications` (or Program Files on Windows). You can add more under **Settings…**.
 
 ## Using it
 
-1. **Add .blend…**, or drop files onto the list (dropping them onto a folder puts them in that folder). Pick a **render folder** (for example your project's `render` folder). Each file gets its own subfolder inside it.
+1. **Add .blend…** (⌘I), or drop files onto the list (dropping them onto a folder puts them in that folder). By default, the output goes into a folder called **`render` next to each .blend file** (`shots/shot_010.blend` → `shots/render/shot_010/`). You can choose a **custom folder** instead. A queue folder can also have its own render folder.
 2. Optional overrides: start/end frame, samples, resolution %. Everything else is taken from the .blend file as saved.
 3. **▶ Start.**
 
@@ -37,7 +37,25 @@ On first launch the app looks for Blender installs in `/Applications` (or Progra
 | **Start job over…** | Forgets the job's progress and renders every frame again. |
 | **Create preview** | Builds an MP4 from the frames finished so far. This also happens automatically when a job finishes. |
 
-**Folders:** use **New folder…** to group jobs, for example per project. Drag jobs between folders, or right-click a job → *Move to folder*. The queue renders top to bottom: jobs outside folders first, then each folder in order. Untick a job or a whole folder to skip it without removing it. A folder can have its own render folder, which is pre-filled when you add files to it.
+**Queue files:** save the queue as a `.bbrqueue` file with **File → Save Queue** (⌘S) or *Save Queue As…* (⇧⌘S). Open it again with *Open Queue…* (⌘O), *Open Recent*, or by double-clicking it in Finder. *New Queue* (⌘N) starts an empty queue. A queue file holds the folders, the jobs in their order and their on/off switches. Each job's progress lives in its own job folder, so the same job shows its progress in every queue that contains it. Saving is manual: a dot in the window's close button (or "*" in the title) means unsaved changes. The app asks before replacing a queue with unsaved changes. The current queue is still kept when you quit, so nothing is lost if you forget to save. Queue files store paths relative to themselves too, so a project folder that contains the queue file and its render folders can be moved as a whole. You can't open or start a new queue while a render is running.
+
+**Folders:** use **New folder…** (⇧⌘N) to group jobs, for example per project. Drag jobs between folders, or right-click a job → *Move to folder*. The queue renders top to bottom: jobs outside folders first, then each folder in order. Untick a job or a whole folder to skip it without removing it. A folder can have its own render folder, which is pre-filled when you add files to it.
+
+**Keyboard shortcuts** (Help → Keyboard shortcuts, ⌘/):
+
+| Key | Action |
+|---|---|
+| ⌫ / Delete | Remove the selected job or folder (asks first) |
+| ⌘⌫ | Remove without asking |
+| ↩ | Open the job's render folder (on a folder: folder settings) |
+| Space | Play the preview video |
+| ⌘↑ / ⌘↓ | Move up / down |
+| ⌘R / ⇧⌘. / ⌘. | Start / stop after this frame / stop now |
+| ⌘N / ⌘O / ⌘S / ⇧⌘S | New / open / save / save queue as |
+| ⌘I / ⇧⌘N | Add .blend files / new folder |
+| ⌘P / ⌘, | Create preview / settings |
+
+The keys that act on a row only work while the queue list has the focus, so typing in a text field never removes a job.
 
 **Blender version per file:** "Auto" reads the version from the .blend file's header. It uses the matching install, or the next newer one if there's no match. You can pick a specific install per job instead.
 
@@ -52,6 +70,32 @@ On first launch the app looks for Blender installs in `/Applications` (or Progra
 - **Moved render folders:** frames are tracked relative to the job folder, so moving or renaming the render folder or the drive is fine. Put the job back with *File → Add existing job folder…*.
 
 **Keep awake:** while a batch runs, the computer is kept from sleeping (`caffeinate` on macOS). This only works while the Mac is plugged in, and a MacBook still sleeps when its lid is closed without an external display.
+
+## Status page & API
+
+While the app runs, it serves a **status page** that works in any browser: *Help → Open status page in browser*, or http://127.0.0.1:8642/. It shows the batch and per-job progress, the frame being rendered with Blender's remaining time, the last finished frame, the queue with its folders, and Blender's console. It also has Start / Stop after frame / Stop now buttons. It updates every two seconds.
+
+**On your phone or another computer:** in *Settings → Status page & API*, tick *Allow other devices on my home network*. Then use *Copy link for other devices*. The link contains a key, so only devices that know it get in. Away from home the app is not reachable. For that, use a VPN such as Tailscale; don't open a port on your router.
+
+**API:** the same server offers a JSON API (version 1) for other tools. Requests from the same computer need the header `X-BBR-Request: 1` for anything that changes something; other devices need `X-API-Key: <key>`.
+
+| Request | Does |
+|---|---|
+| `GET /api/v1/status` | batch state, live frame info, estimates |
+| `GET /api/v1/queue` | folders and jobs in render order |
+| `GET /api/v1/jobs/<id>` | job details (settings, scene, failed frames, runs, frame times) |
+| `GET /api/v1/jobs/<id>/thumbnail` | last finished frame |
+| `GET /api/v1/console?since=N` | recent Blender console lines |
+| `POST /api/v1/jobs` | add a job: `{"blend": "/path/shot.blend", "folder": "Project X", "render_root": "", "frame_start": 1, "frame_end": 100, "start": true}` |
+| `POST /api/v1/batch/start` · `/batch/stop` `{"mode": "after_frame"\|"now"}` · `/batch/cancel-job` | control the batch |
+| `POST /api/v1/jobs/<id>/retry` · `/reset` · `/preview` · `/enabled` `{"enabled": false}` | job actions |
+| `DELETE /api/v1/jobs/<id>` | remove a job from the queue (files stay) |
+
+Example from a terminal: `curl -X POST -H "X-BBR-Request: 1" -d '{"blend": "/Users/me/shot.blend"}' http://127.0.0.1:8642/api/v1/jobs`
+
+## Blender add-on: "Send to Batch Renderer"
+
+`blender_addon/bbr_send_to_queue.py` adds the open file to the queue from inside Blender. Install it in Blender: *Edit → Preferences → Add-ons → ▾ → Install from Disk…*, choose the file, and enable it. Then use *Render → Send to Batch Renderer…* or the *Batch Renderer* panel under *Properties → Output*. You choose the render folder (next to the .blend, or custom), an optional queue folder, an optional frame range, and whether to start right away. Unsaved changes are saved first, because the batch renders the file as it is on disk. The add-on talks to the app through the API, so the app must be running. If you change the port in the app, change it in the add-on's preferences too.
 
 ## Folder per job
 
@@ -87,17 +131,18 @@ The queue itself lives in `~/Library/Application Support/BlenderBatchRenderer/` 
 .venv/bin/python -m bbr scan                 # find Blender installs
 .venv/bin/python -m bbr add shot.blend --root /path/to/render --start 1 --end 100 --folder "Project X"
 .venv/bin/python -m bbr list
-.venv/bin/python -m bbr run                  # Ctrl+C = stop now
+.venv/bin/python -m bbr run                  # Ctrl+C = stop now (the status page runs too)
 ```
 
 ## Tests
 
 `python3 tests/test_engine.py` runs the engine against a simulated Blender (`tests/fake_blender.py`). The tests cover crashes, retries, stop/resume, quitting mid-render, broken files, video→PNG switching, overrides, Blender 5-style output, Blender restarts every N frames, a full disk, changed and missing .blend files, moved render folders, folders and the single-instance lock.
 
-`python3 tools/make_icon.py` redraws the app icon.
+`python3 tests/test_api.py` tests the API, queue files, the default render folder and the Blender add-on (with a stand-in for Blender's Python module).
+
+`python3 tools/make_icon.py` redraws the app icon. `python3 docs/make_docs.py` rebuilds the documentation PDF.
 
 ## License
 
 MIT — see [LICENSE](LICENSE). You may use, change, share and sell this software; just keep the copyright notice.
-
 The app window uses PySide6 (Qt), which is licensed under the LGPL. If you distribute a built app, the LGPL terms apply to the bundled Qt libraries.

@@ -6,6 +6,7 @@ can be driven from the command line (see cli.py).
 """
 from __future__ import annotations
 
+import collections
 import glob
 import os
 import shutil
@@ -73,7 +74,9 @@ class Runner:
     def __init__(self, queue: JobQueue, settings: AppSettings, emit: Emit):
         self.queue = queue
         self.settings = settings
-        self.emit = emit
+        self._emit_ext = emit
+        self.console_tail = collections.deque(maxlen=400)   # (seq, job_id, line) for the API
+        self._console_seq = 0
         self.live = Live()
         self.running = False
         self.current: Optional[Job] = None
@@ -86,6 +89,50 @@ class Runner:
         self._wake = threading.Event()
         self._keep = KeepAwake()
         self._preview_threads = {}
+
+    def emit(self, kind: str, payload: dict) -> None:
+        if kind == "console":
+            self._console_seq += 1
+            self.console_tail.append((self._console_seq, payload.get("job_id"), payload.get("text", "")))
+        self._emit_ext(kind, payload)
+
+    # ---- estimates --------------------------------------------------------
+    def job_eta(self, job: Job) -> Optional[float]:
+        """Seconds until the job is done (uses Blender's own estimate for the current frame)."""
+        if self.running and self.current is job:
+            L = self.live
+            rem = None
+            if L.frame is not None:
+                if L.remaining_s is not None:
+                    rem = L.remaining_s
+                elif L.frame_started and job.avg_frame_seconds():
+                    rem = max(0.0, job.avg_frame_seconds() - (time.time() - L.frame_started))
+            return job.eta_seconds(rem)
+        return job.eta_seconds()
+
+    def job_progress(self, job: Job) -> Optional[float]:
+        """0..1 including the fraction of the frame being rendered, None if unknown."""
+        total = job.total_frames
+        if not total:
+            return None
+        frac = (job.count(F_DONE) + job.count(F_FAILED)) / total
+        if self.running and self.current is job and self.live.frame is not None:
+            ff = self.live.frame_fraction()
+            if ff:
+                frac += ff / total
+        return min(1.0, frac)
+
+    def batch_eta(self):
+        """(seconds for jobs with an estimate, number of jobs without one)."""
+        known, unknown = 0.0, 0
+        for j in self.queue.ordered_jobs():
+            if j.status in RUNNABLE and self.queue.is_active(j):
+                e = self.job_eta(j)
+                if e is None:
+                    unknown += 1
+                else:
+                    known += e
+        return known, unknown
 
     # ---- public control ---------------------------------------------------
     def start(self) -> bool:

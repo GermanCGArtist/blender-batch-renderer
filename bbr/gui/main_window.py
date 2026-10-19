@@ -7,7 +7,7 @@ import time
 from typing import Dict, Optional
 
 from PySide6.QtCore import Qt, QObject, Signal, QTimer, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFontDatabase, QKeySequence, QTextCursor
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFontDatabase, QKeySequence, QTextCursor, QShortcut
 from PySide6.QtWidgets import (QMainWindow, QWidget, QSplitter, QTabWidget, QToolButton,
                                QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QLabel, QProgressBar,
                                QPlainTextEdit, QToolBar, QFileDialog, QMessageBox, QHeaderView,
@@ -17,11 +17,14 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QSplitter, QTabWidget, QToo
 from .. import APP_NAME, __version__
 from ..blendfile import version_str
 from ..installs import BlenderInstall, scan
-from ..jobqueue import JobQueue
+from ..api import ApiServer
+from ..control import Controller
+from ..jobqueue import JobQueue, QUEUE_EXT
 from ..models import (AppSettings, Job, JobSettings, QUEUED, RENDERING, STOPPED, DONE, DONE_ERRORS,
                       FAILED, CANCELLED, ON_HOLD, F_DONE, F_FAILED, RUNNABLE)
 from ..parse import fmt_duration, fmt_bytes
 from ..runner import Runner
+from .api_bridge import QtExecutor
 from .dialogs import SettingsDialog, AddJobsDialog, FolderDialog
 from .queue_tree import QueueTree
 from .widgets import JobSettingsForm, Thumbnail, LineChart
@@ -56,6 +59,23 @@ class MainWindow(QMainWindow):
         self.bridge.event.connect(self._on_event, Qt.ConnectionType.QueuedConnection)
         self.runner = Runner(self.queue, self.settings, lambda k, p: self.bridge.event.emit(k, p))
 
+        # queue file (manual save): compare the queue with what the file holds
+        self._saved_snapshot = None
+        qf = self.settings.current_queue_file
+        if qf and os.path.isfile(qf):
+            self._saved_snapshot = self._file_snapshot(qf)
+        elif qf:
+            self.settings.current_queue_file = ""
+        self.queue.on_change = self._update_title
+
+        # web API + status page
+        self.controller = Controller(self.queue, self.runner, self.settings)
+        self.controller.on_changed = self._after_api_change
+        self.controller.open_queue_file = lambda path: QTimer.singleShot(0, lambda: self.open_queue_file(path))
+        self.controller.queue_file_info = lambda: {"path": self.settings.current_queue_file or None,
+                                                   "modified": self._is_modified()}
+        self.api = ApiServer(self.controller, QtExecutor(), self.settings)
+
         self.console_buf: Dict[str, collections.deque] = {}
         self.pending_console: list = []
         self.selected_id: Optional[str] = None     # selected job
@@ -77,6 +97,8 @@ class MainWindow(QMainWindow):
 
         for w in load_warnings:
             self._add_message("warn", w)
+        self._start_api()
+        self._update_title()
         if first_run:
             QTimer.singleShot(300, self._first_run)
 
@@ -90,21 +112,31 @@ class MainWindow(QMainWindow):
             if shortcut:
                 a.setShortcut(QKeySequence(shortcut))
             if tip:
-                a.setToolTip(tip)
+                a.setToolTip(tip + (f"  ({QKeySequence(shortcut).toString(QKeySequence.SequenceFormat.NativeText)})"
+                                    if shortcut else ""))
                 a.setStatusTip(tip)
             return a
 
-        self.a_add = act("Add .blend…", self.add_files, "Ctrl+O", "Add .blend files to the queue (or drop them on the list)")
+        # queue files
+        self.a_new_queue = act("New Queue", self.new_queue, "Ctrl+N", "Start an empty queue")
+        self.a_open_queue = act("Open Queue…", self.open_queue_dialog, "Ctrl+O", "Open a saved queue file")
+        self.a_save = act("Save Queue", self.save_queue, "Ctrl+S", "Save the queue to its file")
+        self.a_save_as = act("Save Queue As…", self.save_queue_as, "Ctrl+Shift+S", "Save the queue to a new file")
+        self.recent_menu = QMenu("Open Recent", self)
+        self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
+        # jobs & folders
+        self.a_add = act("Add .blend…", self.add_files, "Ctrl+I", "Add .blend files to the queue (or drop them on the list)")
         self.a_add_existing = act("Add existing job folder…", self.add_existing, None,
                                   "Put a job folder back into the queue, e.g. after moving the render folder")
         self.a_new_folder = act("New folder…", self.new_folder, "Ctrl+Shift+N", "Create a folder to organise jobs")
         self.a_edit_folder = act("Folder settings…", self.edit_folder, None, "Rename the folder / set its render folder")
-        self.a_remove = act("Remove", self.remove_selected, None,
-                            "Remove the selected job (files stay on disk) or folder (its jobs move to the top)")
-        self.a_up = act("▲", lambda: self.move_selected(-1), None, "Move up")
-        self.a_down = act("▼", lambda: self.move_selected(1), None, "Move down")
+        self.a_remove = act("Remove…", self.remove_selected, None,
+                            "Remove the selected job (files stay on disk) or folder (its jobs move to the top)  (⌫)")
+        self.a_up = act("▲", lambda: self.move_selected(-1), "Ctrl+Up", "Move up")
+        self.a_down = act("▼", lambda: self.move_selected(1), "Ctrl+Down", "Move down")
+        # rendering
         self.a_start = act("▶  Start", self.start_batch, "Ctrl+R", "Render the queue (resumes where it stopped)")
-        self.a_stop_after = act("Stop after frame", self.stop_after_frame, None,
+        self.a_stop_after = act("Stop after frame", self.stop_after_frame, "Ctrl+Shift+.",
                                 "Let the current frame finish, then stop")
         self.a_stop_now = act("■  Stop now", self.stop_now, "Ctrl+.",
                               "Kill Blender now - the current frame is rendered again next time")
@@ -118,9 +150,15 @@ class MainWindow(QMainWindow):
         self.a_reset = act("Start job over…", self.reset_job, None, "Forget progress and render every frame again")
         self.a_preview = act("Create preview", self.create_preview, "Ctrl+P",
                              "Encode the frames finished so far into preview/<job>.mp4")
-        self.a_folder = act("Open render folder", self.open_folder, None, "Open the job's render folder")
-        self.a_settings = act("Settings…", self.open_settings, "Ctrl+,", "Blender installs and defaults")
+        self.a_play = act("Play preview", self.play_preview, None, "Open the preview video  (Space)")
+        self.a_folder = act("Open render folder", self.open_folder, None, "Open the job's render folder  (↩)")
+        self.a_report = act("Open report.xlsx", self.open_report, None, "Open the job's Excel report")
+        self.a_settings = act("Settings…", self.open_settings, "Ctrl+,", "Blender installs, defaults, API")
         self.a_settings.setMenuRole(QAction.MenuRole.PreferencesRole)
+        self.a_status_page = act("Open status page in browser", self.open_status_page, None,
+                                 "The status page shows progress in any browser – also on your phone")
+        self.a_shortcuts = act("Keyboard shortcuts", self.show_shortcuts, "Ctrl+/", "List of keyboard shortcuts")
+        self.a_docs = act("Documentation", self.open_docs, None, "Open the user guide (PDF)")
 
         tb = QToolBar("Main")
         tb.setMovable(False)
@@ -129,7 +167,8 @@ class MainWindow(QMainWindow):
                   self.a_stop_after, self.a_stop_now, self.a_cancel, None):
             tb.addSeparator() if a is None else tb.addAction(a)
         self.job_menu = QMenu("Job", self)
-        for a in (self.a_retry, self.a_accept, self.a_reset, None, self.a_preview, self.a_folder):
+        for a in (self.a_retry, self.a_accept, self.a_reset, None, self.a_preview, self.a_play, None, self.a_folder,
+                  self.a_report):
             self.job_menu.addSeparator() if a is None else self.job_menu.addAction(a)
         jb = QToolButton()
         jb.setText("Job ▾")
@@ -142,13 +181,22 @@ class MainWindow(QMainWindow):
 
         mb = self.menuBar()
         fm = mb.addMenu("File")
-        for a in (self.a_add, self.a_add_existing, None, self.a_new_folder, self.a_edit_folder, None, self.a_settings):
-            fm.addSeparator() if a is None else fm.addAction(a)
+        for a in (self.a_new_queue, self.a_open_queue, self.recent_menu, None, self.a_save, self.a_save_as, None,
+                  self.a_add, self.a_add_existing, None, self.a_new_folder, self.a_edit_folder, None, self.a_settings):
+            if a is None:
+                fm.addSeparator()
+            elif isinstance(a, QMenu):
+                fm.addMenu(a)
+            else:
+                fm.addAction(a)
         qm = mb.addMenu("Queue")
         for a in (self.a_start, self.a_stop_after, self.a_stop_now, self.a_cancel, None, self.a_up, self.a_down,
                   self.a_remove):
             qm.addSeparator() if a is None else qm.addAction(a)
         mb.addMenu(self.job_menu)
+        hm = mb.addMenu("Help")
+        for a in (self.a_status_page, None, self.a_shortcuts, self.a_docs):
+            hm.addSeparator() if a is None else hm.addAction(a)
 
     def _build_ui(self):
         central = QWidget()
@@ -179,6 +227,16 @@ class MainWindow(QMainWindow):
         self.tree.check_changed.connect(self._on_check)
         self.tree.expanded_changed.connect(self._on_expanded)
         hsplit.addWidget(self.tree)
+        # keys that act on the selected row (only while the queue list has the focus)
+        ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
+        for key, slot in (("Backspace", self.remove_selected), ("Delete", self.remove_selected),
+                          ("Ctrl+Backspace", lambda: self.remove_selected(confirm=False)),
+                          ("Ctrl+Delete", lambda: self.remove_selected(confirm=False)),
+                          ("Return", self._enter_pressed), ("Enter", self._enter_pressed),
+                          ("Space", self.play_preview)):
+            sc = QShortcut(QKeySequence(key), self.tree)
+            sc.setContext(ctx)
+            sc.activated.connect(slot)
 
         # ---- right side tabs -------------------------------------------------
         self.tabs = QTabWidget()
@@ -446,16 +504,7 @@ class MainWindow(QMainWindow):
         return fmt_duration(eta) if eta is not None else "?"
 
     def _job_eta(self, j: Job) -> Optional[float]:
-        if self._is_current(j):
-            L = self.runner.live
-            rem = None
-            if L.frame is not None:
-                if L.remaining_s is not None:
-                    rem = L.remaining_s
-                elif L.frame_started and j.avg_frame_seconds():
-                    rem = max(0.0, j.avg_frame_seconds() - (time.time() - L.frame_started))
-            return j.eta_seconds(rem)
-        return j.eta_seconds()
+        return self.runner.job_eta(j)
 
     def _on_select(self):
         sel = self.tree.selected()
@@ -497,11 +546,8 @@ class MainWindow(QMainWindow):
         if j:
             for a in (self.a_retry, self.a_accept, self.a_reset, None, self.a_preview, self.a_folder):
                 m.addSeparator() if a is None else m.addAction(a)
-            if j.preview_path and os.path.exists(j.preview_path):
-                m.addAction("Play preview").triggered.connect(lambda: self._open_path(j.preview_path))
-            rep = j.data_dir / "report.xlsx"
-            if rep.exists():
-                m.addAction("Open report.xlsx").triggered.connect(lambda: self._open_path(rep))
+            m.addAction(self.a_play)
+            m.addAction(self.a_report)
             m.addSeparator()
             mv = m.addMenu("Move to folder")
             mv.addAction("— top level —").triggered.connect(lambda: self._move_to_group(j, ""))
@@ -541,6 +587,11 @@ class MainWindow(QMainWindow):
         self.a_reset.setEnabled(bool(j) and not cur)
         self.a_preview.setEnabled(bool(j) and j.count(F_DONE) > 0)
         self.a_folder.setEnabled(bool(j))
+        self.a_play.setEnabled(bool(j) and bool(j.preview_path) and os.path.exists(j.preview_path or ""))
+        self.a_report.setEnabled(bool(j) and (j.data_dir / "report.xlsx").exists())
+        self.a_new_queue.setEnabled(not running)
+        self.a_open_queue.setEnabled(not running)
+        self.recent_menu.setEnabled(not running)
         self.b_apply.setEnabled(bool(j) and not cur)
         self.l_form_note.setText("This job is rendering – stop it to change settings." if cur else
                                  "Changes apply the next time the job renders. Finished frames are kept.")
@@ -773,21 +824,24 @@ class MainWindow(QMainWindow):
     # ======================================================================
     def add_files(self, files=None, gid=None):
         if not files:
-            start = self.settings.last_render_root or os.path.expanduser("~")
+            start = self.settings.last_blend_dir or os.path.expanduser("~")
             files, _ = QFileDialog.getOpenFileNames(self, "Add .blend files", start, "Blender files (*.blend)")
         files = [f for f in files if f.lower().endswith(".blend")]
         if not files:
             return
+        self.settings.last_blend_dir = os.path.dirname(os.path.abspath(files[0]))
         if gid is None:
             j = self._sel()
             gid = self.selected_gid or (j.group if j else "")
         dlg = AddJobsDialog(files, self.settings, self._installs(), self, groups=self.queue.groups, group_id=gid or "")
         if dlg.exec() != AddJobsDialog.DialogCode.Accepted:
+            self.settings.save()
             return
         s = dlg.form.get_settings()
+        s.render_root = dlg.render_root()
         if s.render_root:
             self.settings.last_render_root = s.render_root
-            self.settings.save()
+        self.settings.save()
         last = None
         for f in files:
             js = JobSettings.from_dict(vars(s).copy())
@@ -847,13 +901,9 @@ class MainWindow(QMainWindow):
         if kind == "j":
             j = self.queue.find(ident)
             if j:
-                j.enabled = checked
-                self.queue.save_job(j)
+                self.queue.set_enabled(j, checked)
         else:
-            g = self.queue.group(ident)
-            if g:
-                g["enabled"] = checked
-                self.queue.save()
+            self.queue.set_group_enabled(ident, checked)
         self._refresh_table()
         self._update_actions()
 
@@ -863,12 +913,12 @@ class MainWindow(QMainWindow):
             g["expanded"] = state
             self.queue.save()
 
-    def remove_selected(self):
+    def remove_selected(self, confirm: bool = True):
         if self.selected_gid:
             g = self.queue.group(self.selected_gid)
-            if g and QMessageBox.question(self, "Delete folder", f"Delete the folder '{g['name']}'?\n"
+            if g and (not confirm or QMessageBox.question(self, "Delete folder", f"Delete the folder '{g['name']}'?\n"
                                           "Its jobs move to the top level of the queue.") \
-                    == QMessageBox.StandardButton.Yes:
+                    == QMessageBox.StandardButton.Yes):
                 self.queue.remove_group(g["id"])
                 self.selected_gid = None
                 self._refresh_table(full=True)
@@ -876,7 +926,7 @@ class MainWindow(QMainWindow):
         j = self._sel()
         if not j or self._is_current(j):
             return
-        if QMessageBox.question(self, "Remove job", f"Remove '{j.name}' from the queue?\n"
+        if confirm and QMessageBox.question(self, "Remove job", f"Remove '{j.name}' from the queue?\n"
                                 "Rendered frames and data stay in its folder; adding the same file "
                                 "to the same render folder again picks up where it left off.") \
                 != QMessageBox.StandardButton.Yes:
@@ -959,12 +1009,226 @@ class MainWindow(QMainWindow):
             self._open_path(j.folder)
 
     def open_settings(self):
-        dlg = SettingsDialog(self.settings, self)
+        dlg = SettingsDialog(self.settings, self, api=self.api)
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             dlg.apply()
             self.console.setMaximumBlockCount(self.settings.console_lines)
             self.job_form.reload_installs()
             self._update_actions()
+            if dlg.api_changed:
+                self._start_api()
+
+    # ======================================================================
+    # queue files
+    # ======================================================================
+    def _file_snapshot(self, path):
+        snap = JobQueue.read_file_snapshot(path)
+        if snap:
+            snap.pop("_expanded", None)
+        return snap
+
+    def _is_modified(self) -> bool:
+        if self._saved_snapshot is None:
+            return bool(self.queue.jobs or self.queue.groups)
+        return self.queue.snapshot() != self._saved_snapshot
+
+    def _update_title(self):
+        qf = self.settings.current_queue_file
+        name = os.path.basename(qf) if qf else "Untitled queue"
+        self.setWindowTitle(f"{name}[*] – {APP_NAME}")
+        self.setWindowFilePath(qf or "")
+        self.setWindowModified(self._is_modified())
+        if hasattr(self, "a_save"):
+            self.a_save.setEnabled(self._is_modified() or not qf)
+
+    def _confirm_discard(self, what: str) -> bool:
+        """Ask before replacing a queue with unsaved changes. True = go ahead."""
+        if not self._is_modified():
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText("Save the changes to the current queue?")
+        box.setInformativeText(f"Your changes will be lost if you {what} without saving. "
+                               "Jobs and rendered frames always stay on disk.")
+        save = box.addButton("Save…" if not self.settings.current_queue_file else "Save",
+                             QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Don't Save", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(save)
+        box.exec()
+        if box.clickedButton() is save:
+            return self.save_queue()
+        return box.clickedButton() is discard
+
+    def _busy_rendering(self, what: str) -> bool:
+        if self.runner.running:
+            QMessageBox.information(self, APP_NAME, f"Stop the batch before you {what}.")
+            return True
+        return False
+
+    def new_queue(self):
+        if self._busy_rendering("start a new queue") or not self._confirm_discard("start a new queue"):
+            return
+        self.queue.clear()
+        self.settings.current_queue_file = ""
+        self.settings.save()
+        self._saved_snapshot = None
+        self.selected_id = self.selected_gid = None
+        self._refresh_table(full=True)
+        self._update_actions()
+        self._update_title()
+
+    def open_queue_dialog(self):
+        start = os.path.dirname(self.settings.current_queue_file) if self.settings.current_queue_file else \
+            (self.settings.last_blend_dir or os.path.expanduser("~"))
+        path, _ = QFileDialog.getOpenFileName(self, "Open queue", start, f"Batch Renderer queue (*{QUEUE_EXT})")
+        if path:
+            self.open_queue_file(path)
+
+    def open_queue_file(self, path: str):
+        path = os.path.abspath(path)
+        self.raise_()
+        self.activateWindow()
+        if path == self.settings.current_queue_file and not self._is_modified():
+            return
+        if self._busy_rendering("open another queue") or not self._confirm_discard("open another queue"):
+            return
+        try:
+            warnings = self.queue.load_file(path)
+        except (ValueError, OSError) as e:
+            QMessageBox.warning(self, "Open queue", f"Could not open {os.path.basename(path)}:\n{e}")
+            return
+        self.settings.current_queue_file = path
+        self.settings.add_recent(path)
+        self.settings.save()
+        self._saved_snapshot = self._file_snapshot(path)
+        for w in warnings:
+            self._add_message("warn", w)
+        self._add_message("info", f"Opened queue {os.path.basename(path)} ({len(self.queue.jobs)} jobs)")
+        self.selected_id = self.selected_gid = None
+        self._refresh_table(full=True)
+        self._update_actions()
+        self._update_title()
+
+    def save_queue(self) -> bool:
+        if not self.settings.current_queue_file:
+            return self.save_queue_as()
+        return self._save_to(self.settings.current_queue_file)
+
+    def save_queue_as(self) -> bool:
+        start = self.settings.current_queue_file or os.path.join(
+            self.settings.last_blend_dir or os.path.expanduser("~"), "queue" + QUEUE_EXT)
+        path, _ = QFileDialog.getSaveFileName(self, "Save queue as", start, f"Batch Renderer queue (*{QUEUE_EXT})")
+        if not path:
+            return False
+        if not path.lower().endswith(QUEUE_EXT):
+            path += QUEUE_EXT
+        return self._save_to(path)
+
+    def _save_to(self, path: str) -> bool:
+        try:
+            self.queue.save_file(path)
+        except OSError as e:
+            QMessageBox.warning(self, "Save queue", f"Could not save:\n{e}")
+            return False
+        self.settings.current_queue_file = os.path.abspath(path)
+        self.settings.add_recent(path)
+        self.settings.save()
+        self._saved_snapshot = self._file_snapshot(path)
+        self._add_message("info", f"Saved queue to {path}")
+        self._update_title()
+        return True
+
+    def _fill_recent_menu(self):
+        self.recent_menu.clear()
+        items = [p for p in self.settings.recent_queue_files if os.path.isfile(p)]
+        for p in items:
+            a = self.recent_menu.addAction(os.path.basename(p))
+            a.setToolTip(p)
+            a.triggered.connect(lambda _=False, path=p: self.open_queue_file(path))
+        if not items:
+            a = self.recent_menu.addAction("No recent queues")
+            a.setEnabled(False)
+        else:
+            self.recent_menu.addSeparator()
+            self.recent_menu.addAction("Clear menu").triggered.connect(self._clear_recent)
+
+    def _clear_recent(self):
+        self.settings.recent_queue_files = []
+        self.settings.save()
+
+    # ======================================================================
+    # API, status page, help
+    # ======================================================================
+    def _start_api(self):
+        if not self.settings.api_enabled:
+            self.api.stop()
+            return
+        if self.api.start():
+            where = "this Mac and your home network" if self.settings.api_allow_lan else "this computer"
+            self._add_message("info", f"Status page and API running on {where}: {self.api.url}")
+        else:
+            self._add_message("warn", f"Status page / API could not start: {self.api.error}. "
+                                      "Choose another port in Settings.")
+
+    def _after_api_change(self):
+        self._refresh_table(full=True)
+        self._update_actions()
+        self._refresh_live()
+
+    def open_status_page(self):
+        if not self.api.running:
+            QMessageBox.information(self, APP_NAME, "The status page is switched off or could not start – "
+                                    "see Settings → Status page & API.")
+            return
+        QDesktopServices.openUrl(QUrl(self.api.url))
+
+    def show_shortcuts(self):
+        rows = [("⌘N", "New queue"), ("⌘O", "Open queue…"), ("⌘S / ⇧⌘S", "Save queue / Save as…"),
+                ("⌘I", "Add .blend files…"), ("⇧⌘N", "New folder…"),
+                ("⌫ / Delete", "Remove the selected job or folder (asks first)"),
+                ("⌘⌫", "Remove without asking"), ("↩", "Open the job's render folder / folder settings"),
+                ("Space", "Play the preview video"), ("⌘↑ / ⌘↓", "Move up / down"),
+                ("⌘R", "Start"), ("⇧⌘.", "Stop after this frame"), ("⌘.", "Stop now"),
+                ("⌘P", "Create preview"), ("⌘,", "Settings"), ("⌘/", "This list")]
+        html = "<table cellspacing=6>" + "".join(f"<tr><td><b>{k}</b></td><td>{v}</td></tr>" for k, v in rows) + \
+               "</table><p style='color:gray'>On Windows/Linux, ⌘ is Ctrl.</p>"
+        QMessageBox.information(self, "Keyboard shortcuts", html)
+
+    def open_docs(self):
+        import sys
+        here = os.path.dirname(os.path.abspath(__file__))
+        cands = [os.path.join(getattr(sys, "_MEIPASS", ""), "docs"),
+                 os.path.join(here, "..", "..", "docs")]
+        for c in cands:
+            p = os.path.join(c, "Blender_Batch_Renderer_Documentation.pdf")
+            if os.path.isfile(p):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(p)))
+                return
+        QMessageBox.information(self, APP_NAME, "The documentation PDF was not found next to the app.")
+
+    def _enter_pressed(self):
+        if self._sel():
+            self.open_folder()
+        elif self.selected_gid:
+            self.edit_folder()
+
+    def play_preview(self):
+        j = self._sel()
+        if not j:
+            return
+        if j.preview_path and os.path.exists(j.preview_path):
+            self._open_path_file(j.preview_path)
+        elif j.count(F_DONE):
+            self.statusBar().showMessage("No preview yet – use Job ▸ Create preview (⌘P)", 6000)
+
+    def open_report(self):
+        j = self._sel()
+        if j and (j.data_dir / "report.xlsx").exists():
+            self._open_path_file(j.data_dir / "report.xlsx")
+
+    def _open_path_file(self, p):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
 
     def _apply_job_settings(self):
         j = self._sel()
@@ -1005,6 +1269,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         if not self.runner.running:
+            self.api.stop()
             e.accept()
             return
         if self._quit_when_idle:
@@ -1022,6 +1287,7 @@ class MainWindow(QMainWindow):
         if clicked is now:
             self.runner.stop_now()
             self.runner.wait(15)
+            self.api.stop()
             e.accept()
         elif clicked is after:
             self._quit_when_idle = True
