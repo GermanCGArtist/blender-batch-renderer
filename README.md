@@ -95,3 +95,9 @@ The queue itself lives in `~/Library/Application Support/BlenderBatchRenderer/` 
 `python3 tests/test_engine.py` runs the engine against a simulated Blender (`tests/fake_blender.py`). The tests cover crashes, retries, stop/resume, quitting mid-render, broken files, video→PNG switching, overrides, Blender 5-style output, Blender restarts every N frames, a full disk, changed and missing .blend files, moved render folders, folders and the single-instance lock.
 
 `python3 tools/make_icon.py` redraws the app icon.
+
+## License
+
+MIT — see [LICENSE](LICENSE). You may use, change, share and sell this software; just keep the copyright notice.
+
+The app window uses PySide6 (Qt), which is licensed under the LGPL. If you distribute a built app, the LGPL terms apply to the bundled Qt libraries.
