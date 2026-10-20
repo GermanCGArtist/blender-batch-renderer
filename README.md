@@ -143,6 +143,7 @@ Several computers can render the frames of one animation together, e.g. a Window
   The rest of the job carries on on the other computers.
 - **Stop after frame:** every machine delivers its current frame first. **Stop now** and **Cancel job:** every machine drops its frame, and nothing counts as failed.
 - **A worker vanishes** (sleep, Wi-Fi drop): after 45 s without a heartbeat, its frame goes back to the pool. **A worker crashes on a frame:** the failed attempt is counted against that machine, and the frame is preferably given to another one.
+- **Pausing a worker** (e.g. to use the PC for something else): on the worker, *Pause after frame* finishes and delivers its current frame, *Stop now* drops it at once, and *Resume* takes frames again. The same three buttons are in the coordinator's **Machines** tab (select the computer, or right-click it) and on the status page. The worker's frames go to the other computers, and nothing counts as failed.
 - **Locked while rendering:** the mode switch, sharing and the worker's settings. On a worker, use *Pause after frame* or *Stop now* instead.
 
 **Statistics:** the **Machines** tab shows, per machine:

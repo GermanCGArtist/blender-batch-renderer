@@ -1044,6 +1044,11 @@ curl -X POST -H "X-BBR-Request: 1" \\
     s.append(H2("15.5  Stopping, failures and lost machines"))
     s.append(table([
         ["Situation", "What happens"],
+        ["Pause / stop one worker", "<i>Pause after frame</i>: it delivers its current frame, then takes no more. "
+                                    "<i>Stop now</i>: it drops its frame at once. <i>Resume</i>: it takes frames "
+                                    "again. On the worker itself, in the coordinator's Machines tab (buttons or "
+                                    "right-click) and on the status page. Its work goes to the other computers; "
+                                    "nothing counts as failed."],
         ["Stop after frame", "Every machine finishes and delivers the frame it is working on, then the batch stops."],
         ["Stop now / Cancel job", "Every machine drops its frame at once; nothing is counted as failed."],
         ["Pausing one computer", "<b>Pause after frame</b> (it delivers its frame, then takes no more), <b>Stop now</b> "
