@@ -78,7 +78,7 @@ if MAC:
       info_plist={
           "CFBundleName": APP,
           "CFBundleDisplayName": APP,
-          "CFBundleShortVersionString": "0.6.0",
+          "CFBundleShortVersionString": "1.0.0",
           # double-clicking a .bbrqueue file opens it in the app
           "CFBundleDocumentTypes": [{
               "CFBundleTypeName": "Batch Renderer Queue",

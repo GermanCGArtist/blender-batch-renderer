@@ -85,7 +85,10 @@ def _get_json(url: str):
 
 
 def _version_tuple(v: str):
-    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
+    """'1.0.0-beta' < '1.0.0' < '1.0.1': numbers first, then a pre-release (beta, rc …) before the final."""
+    nums = [int(x) for x in re.findall(r"\d+", (v or "").split("-")[0])[:3]]
+    nums += [0] * (3 - len(nums))
+    return tuple(nums) + ((0,) if "-" in (v or "") else (1,))
 
 
 # ---- what is running -------------------------------------------------------------------

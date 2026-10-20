@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(HERE, "Blender_Batch_Renderer_Documentation.pdf")
 ICON = os.path.join(ROOT, "bbr", "assets", "icon.png")
-VERSION = "0.6.0"
+VERSION = "1.0 beta"
 
 F = "/usr/share/fonts/truetype/dejavu/"
 G = "/usr/share/fonts/truetype/google-fonts/"
