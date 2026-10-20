@@ -1,5 +1,6 @@
 """Blender Batch Renderer - queue, resume and monitor Blender renders."""
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 PROTOCOL = 2          # worker <-> coordinator protocol; both must match
+SHELL_REQUIRED = 1    # the built app (Python, Qt, libraries) this code needs; see bbr_launcher.py
 APP_NAME = "Blender Batch Renderer"

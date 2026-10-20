@@ -11,9 +11,19 @@ The setup script creates a fresh private Python environment in `.venv` (about 0.
 
 ## Start
 
-**macOS app (recommended):** double-click `build_app.command` once. It builds **Blender Batch Renderer.app**, with its own icon and Dock name, next to the script. Drag the app to Applications if you like. Re-run the script after updating the code.
+**macOS app (recommended):** double-click `build_app.command` once. It builds **Blender Batch Renderer.app**, with its own icon and Dock name, next to the script. Drag the app to Applications if you like. You only need to build again when an update asks for it (see below).
 
 The build leaves out the parts of Qt the app doesn't use (QML/Quick, PDF, networking, OpenGL, SVG, translations …; see `bbr.spec`). It then starts the new app once in the background as a test. If the trimmed app doesn't start, it automatically rebuilds with all of Qt included and says so. Once the app is built, `.venv` is only needed to run `run.command` or to rebuild, so you can delete it to save space; `setup.command` recreates it.
+
+**Windows app:** run `build_windows.bat` once. It builds a folder **Blender Batch Renderer** containing `Blender Batch Renderer.exe`; pin it to the taskbar if you like.
+
+**Updates without rebuilding:** *Help → Check for updates…* looks on GitHub for a newer version and installs only the app code (1–2 MB), next to the current version. Updates never happen by themselves, and never while something renders.
+- **Channels:** **Stable** (the `release` branch) offers versions that were tried and approved. **Alpha** (the `main` branch) offers every change as soon as it's made; these are experimental and marked "alpha".
+- **Checks:** every file is checked against GitHub's checksums before it's installed.
+- **Going back:** *Use previous version* in the same window switches back. If a new version doesn't start, the app goes back to the previous one by itself and says so.
+- **When you still need to rebuild:** only when a version needs a newer Python, Qt or library. The update window then says so instead of installing it.
+- **Where updates live:** in the app data folder (`app/`), not inside the app, so the macOS app stays intact.
+- **Mac and PC:** update both to the same version, because coordinator and workers must match.
 
 **Without building:** double-click `run.command` (or `run.bat` / `./run.sh`). A Terminal window opens alongside; keep it open while the app runs.
 
@@ -186,6 +196,12 @@ The queue itself lives in `~/Library/Application Support/BlenderBatchRenderer/` 
 ## Tests
 
 `python3 tests/test_engine.py` runs the engine against a simulated Blender (`tests/fake_blender.py`). The tests cover crashes, retries, stop/resume, quitting mid-render, broken files, video→PNG switching, overrides, Blender 5-style output, Blender restarts every N frames, a full disk, changed and missing .blend files, moved render folders, folders and the single-instance lock.
+
+`python3 tests/test_updater.py` tests updates against a local stand-in for GitHub:
+- checking, installing and starting the new version;
+- the alpha channel;
+- refusing damaged downloads and versions that need a newer app;
+- falling back when a version doesn't start, and switching back and forth.
 
 `python3 tests/test_transfer.py` tests the file transfer:
 - Smart transfer with per-frame files and reuse across jobs;

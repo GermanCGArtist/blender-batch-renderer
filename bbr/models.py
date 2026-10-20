@@ -97,6 +97,7 @@ class AppSettings:
     worker_cache_gb: float = 50.0
     worker_cache_dir: str = ""            # worker: where downloaded job files live ("" = app data folder)         # worker: keep job packages up to this size
     worker_stats: dict = field(default_factory=dict)      # worker: lifetime statistics
+    update_channel: str = "stable"        # "stable" (release branch) or "alpha" (every change, experimental)
     settings_version: int = 1
 
     @property

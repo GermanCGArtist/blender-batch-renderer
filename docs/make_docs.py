@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(HERE, "Blender_Batch_Renderer_Documentation.pdf")
 ICON = os.path.join(ROOT, "bbr", "assets", "icon.png")
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 F = "/usr/share/fonts/truetype/dejavu/"
 G = "/usr/share/fonts/truetype/google-fonts/"
@@ -462,7 +462,10 @@ def build():
     s.append(H3("Option A – a real macOS app (recommended)"))
     s.append(P("Double-click <font face='Mono'>build_app.command</font>. It builds <b>Blender Batch Renderer.app</b> "
                "next to the script, with its own icon and name in the Dock; drag it to Applications if you like. "
-               "Run the script again after every code update."))
+               "You only need to build again when an update asks for it (2.4)."))
+    s.append(P("<b>Windows:</b> run <font face='Mono'>build_windows.bat</font> once. It builds the folder "
+               "<b>Blender Batch Renderer</b> with <font face='Mono'>Blender Batch Renderer.exe</font> inside, "
+               "with the same self-test."))
     s.append(P("The build leaves out the parts of Qt the app never uses (QML/Quick, PDF, networking, OpenGL, SVG, "
                "translations – see <font face='Mono'>bbr.spec</font>) and then starts the new app once in the "
                "background as a self-test: it draws the charts, loads a thumbnail and writes a test report. If "
@@ -473,7 +476,30 @@ def build():
     s.append(note("Once the app is built, the <font face='Mono'>.venv</font> folder is only needed for "
                   "Option B and for rebuilding. You can delete it to save space; <font face='Mono'>setup.command</font> "
                   "recreates it.", "Disk space"))
-    s.append(H2("2.4  First launch"))
+    s.append(H2("2.4  Updates without rebuilding"))
+    s.append(P("The built app consists of a <b>shell</b> – Python, Qt and the libraries, about 95 % of its size – and "
+               "the <b>app code</b>. <i>Help → Check for updates…</i> asks GitHub for a newer version and installs "
+               "only the app code (1–2 MB) into the app data folder (<font face='Mono'>app/</font>, see 10.3), next "
+               "to the current version. The shell stays as it is, so the app is not rebuilt. Nothing is checked or "
+               "installed unless you ask, and nothing while something renders."))
+    s.append(table([
+        ["Channel", "Offers"],
+        ["Stable", "Versions that were tried and approved (the <font face='Mono'>release</font> branch)."],
+        ["Alpha", "Every change as soon as it is made (the <font face='Mono'>main</font> branch) – experimental, "
+                  "marked “alpha”."],
+    ], [30, 140]))
+    s += bullets([
+        "Every file of an update is checked against the checksums GitHub keeps for that version before it is "
+        "installed; a damaged download is refused.",
+        "<i>Use previous version</i> (same window) switches back. A version that does not start is replaced by the "
+        "previous one automatically, with a message.",
+        "A version that needs a newer shell (new Python, Qt or library) is not installed; the window says to build "
+        "the app again (<font face='Mono'>build_app.command</font> / <font face='Mono'>build_windows.bat</font>).",
+        "Coordinator and workers must run the same version – update both computers.",
+        "When running from source (<font face='Mono'>run.command</font>), updates are not used; use "
+        "<font face='Mono'>git pull</font> instead.",
+    ])
+    s.append(H2("2.5  First launch"))
     s.append(P("On first launch the app searches for Blender installs (macOS: <font face='Mono'>/Applications</font> "
                "and <font face='Mono'>~/Applications</font>; Windows: Program Files and Steam; Linux: PATH, "
                "<font face='Mono'>/opt</font>, home folder) and asks each one for its version. Add or remove installs "
@@ -1223,7 +1249,8 @@ curl -X POST -H "X-BBR-Request: 1" \\
                "simulates a coordinator with workers: job copies with nested linked libraries and add-on detection, "
                "pairing and access checks, discovery, faster and slower workers, a missing add-on, crashing "
                "workers, a worker that disappears, stop now / stop after frame, and the coordinator rendering "
-               "together with a worker. <font face='Mono'>python3 tests/test_transfer.py</font> tests the file "
+               "together with a worker. <font face='Mono'>python3 tests/test_updater.py</font> tests updates against a "
+               "local stand-in for GitHub. <font face='Mono'>python3 tests/test_transfer.py</font> tests the file "
                "transfer: Smart transfer and reuse across jobs, damaged downloads and uploads, the switch to Full "
                "copy, the version check, the consistency check, the last-frames rule and remembered checksums."))
 

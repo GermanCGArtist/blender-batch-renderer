@@ -165,6 +165,8 @@ class MainWindow(QMainWindow):
                                  "The status page shows progress in any browser – also on your phone")
         self.a_shortcuts = act("Keyboard shortcuts", self.show_shortcuts, "Ctrl+/", "List of keyboard shortcuts")
         self.a_docs = act("Documentation", self.open_docs, None, "Open the user guide (PDF)")
+        self.a_updates = act("Check for updates…", self.check_updates, None,
+                             "Look for a newer version on GitHub and install it without rebuilding the app")
 
         tb = QToolBar("Main")
         tb.setMovable(False)
@@ -230,7 +232,7 @@ class MainWindow(QMainWindow):
             m.setToolTipsVisible(True)
         hm = mb.addMenu("Help")
         hm.setToolTipsVisible(True)
-        for a in (self.a_status_page, None, self.a_shortcuts, self.a_docs):
+        for a in (self.a_status_page, None, self.a_shortcuts, self.a_docs, None, self.a_updates):
             hm.addSeparator() if a is None else hm.addAction(a)
 
     def _build_ui(self):
@@ -1379,6 +1381,25 @@ class MainWindow(QMainWindow):
                                     "see Settings → Status page & API.")
             return
         QDesktopServices.openUrl(QUrl(self.api.url))
+
+    def check_updates(self):
+        from .update_dialog import UpdateDialog
+
+        def busy():
+            if self.runner.running:
+                return "A batch is rendering"
+            if self.worker_view.busy:
+                return "This computer is rendering for the coordinator"
+            return ""
+        dlg = UpdateDialog(self.settings, busy, self)
+        if dlg.exec() == 2:
+            from .. import updater
+            if busy():
+                return
+            if updater.restart_later():
+                self.close()
+            else:
+                QMessageBox.information(self, APP_NAME, "Quit the app and start it again to use the new version.")
 
     def show_shortcuts(self):
         rows = [("⌘N", "New queue"), ("⌘O", "Open queue…"), ("⌘S / ⇧⌘S", "Save queue / Save as…"),

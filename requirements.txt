@@ -2,3 +2,4 @@ PySide6-Essentials>=6.6
 openpyxl>=3.1
 psutil>=5.9
 zstandard>=0.21
+certifi>=2023.7

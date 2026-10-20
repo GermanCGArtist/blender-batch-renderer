@@ -68,6 +68,16 @@ def main() -> int:
     for path in files + app.pending:
         QTimer.singleShot(0, lambda p=path: w.open_queue_file(p))
     app.pending = []
+
+    def started():
+        try:
+            import bbr_launcher
+            bbr_launcher.mark_started()
+            if bbr_launcher.ACTIVE.get("fallback_note"):
+                w._add_message("warn", bbr_launcher.ACTIVE["fallback_note"])
+        except ImportError:
+            pass
+    QTimer.singleShot(5000, started)
     if smoke:
         def done():
             # exercise the parts that load extra code: charts, thumbnail, Excel report, API
@@ -82,6 +92,9 @@ def main() -> int:
             from ..models import Job
             from ..reports import write_xlsx
             import psutil  # noqa: F401
+            from .. import updater           # needs ssl/certifi in the built app
+            updater.current()
+            updater._ctx()
             j = Job(blend_path="smoke.blend", folder=os.path.join(os.environ.get("BBR_DATA_DIR", "."), "smoke"),
                     name="smoke")
             j.frames = {str(i): {"status": "done", "render_s": 1.0 + i, "size": 1000} for i in range(1, 4)}
@@ -89,8 +102,13 @@ def main() -> int:
             api_ok = w.api.running
             qf = os.path.join(os.environ.get("BBR_DATA_DIR", "."), "smoke" + QUEUE_EXT)
             w.queue.save_file(qf)
-            print("SMOKE TEST OK" if ok and api_ok else f"SMOKE TEST: report={ok} api={api_ok} {w.api.error}",
-                  flush=True)
+            result = "SMOKE TEST OK" if ok and api_ok else f"SMOKE TEST: report={ok} api={api_ok} {w.api.error}"
+            print(result, flush=True)
+            try:      # a windowed Windows .exe has no console to print to
+                with open(os.path.join(os.environ.get("BBR_DATA_DIR", "."), "smoke_result.txt"), "w") as fh:
+                    fh.write(result)
+            except OSError:
+                pass
             w.api.stop()
             app.quit()
         QTimer.singleShot(1500, done)
