@@ -129,7 +129,7 @@ for n in ("chars.blend", "props.blend", "shared.blend"):
 tex = os.path.join(TMP, "proj", "tex", "wood.png")
 os.makedirs(os.path.dirname(tex), exist_ok=True)
 open(tex, "wb").write(b"png")
-tree = {"main": ["//libs/chars.blend", "//libs/props.blend"],
+tree = {"main": ["//libs/chars.blend", "//libs/props.blend", "0|//shared.blend"],
         os.path.normpath(os.path.join(libdir, "chars.blend")): ["//shared.blend"],
         os.path.normpath(os.path.join(libdir, "props.blend")): ["//shared.blend"]}
 coord_inst = fake_exe("blender_coord", FAKE_ADDONS="lens_sim:LensSim:1.2.0;tools:Handy Tools:2.0",
@@ -150,7 +150,10 @@ names = sorted(p for p, e in M["files"].items() if e["kind"] == "scene")
 main = json.loads((vdir / "main.blend").read_text())
 libs = {n: json.loads((vdir / n).read_text()) for n in names if n.startswith("libs/")}
 check("main.blend" in names and len(libs) == 3, f"main + 3 libraries (shared once) ({names})")
-check(all(p.startswith("//libs/") for p in main["libraries"]), "main file links point into libs/")
+check(all(p.startswith("//libs/") for p in main["libraries"] if "|" not in p), "main file links point into libs/")
+ind = [p for p in main["libraries"] if "|" in p]
+check(len(ind) == 1 and ind[0].split("|", 1)[1].startswith("//") and "/" not in ind[0].split("|", 1)[1][2:],
+      f"an indirectly linked library points next to its parent in libs/ ({ind})")
 check(all(p.startswith("//") and "/" not in p[2:] for d in libs.values() for p in d["libraries"]),
       "libraries link each other side by side")
 check(main["images"][0][0].startswith("//a/") and main["images"][0][1] is False,

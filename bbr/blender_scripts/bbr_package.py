@@ -281,7 +281,12 @@ def make_self_contained(prefix, where, blend_layout):
         src = lib_abspath(lib)
         k = key_for(src)
         found.append((src, k))
-        lib.filepath = (up + "libs/" if prefix == "//" else "//") + k + ".blend"
+        if prefix == "//" and not getattr(lib, "parent", None):
+            lib.filepath = "//libs/" + k + ".blend"
+        else:
+            # a library inside libs/, or one linked indirectly: its path counts from the library that
+            # links it, which lives in libs/ too – so it is a neighbour there
+            lib.filepath = "//" + k + ".blend"
     return found
 
 
@@ -343,6 +348,7 @@ def main():
         seen.add(k)
         if not os.path.exists(src):
             missing.append(src)
+            missing.append(k + ".blend")      # the name it has on workers: missing there as well
             warnings.append("missing linked library: %s" % src)
             continue
         try:

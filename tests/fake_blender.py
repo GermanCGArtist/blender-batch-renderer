@@ -194,7 +194,13 @@ def load_data(path, is_main):
     except (OSError, ValueError, UnicodeDecodeError):
         saved = None
     if saved and saved.get("fake_blend"):          # a copy written by save_as_mainfile below
-        libs = [NS(filepath=p, parent=None) for p in saved["libraries"]]
+        libs = []
+        for p in saved["libraries"]:
+            parent = None
+            if "|" in p:
+                i, p = p.split("|", 1)
+                parent = libs[int(i)]
+            libs.append(NS(filepath=p, parent=parent))
         imgs = Images()
         for fp, packed, src in saved["images"]:
             im = make_image(fp, src)
@@ -202,7 +208,13 @@ def load_data(path, is_main):
             imgs.append(im)
     else:
         key = "main" if is_main else os.path.normpath(path)
-        libs = [NS(filepath=p, parent=None) for p in libtree.get(key, [])]
+        libs = []
+        for p in libtree.get(key, []):         # "0|//shared.blend" = linked indirectly through library 0
+            parent = None
+            if "|" in p:
+                i, p = p.split("|", 1)
+                parent = libs[int(i)]
+            libs.append(NS(filepath=p, parent=parent))
         imgs = Images(make_image(p) for p in (env.get("FAKE_IMAGES", "").split(";") if is_main else []) if p)
     mats = []
     for im in imgs:
@@ -220,7 +232,8 @@ def load_data(path, is_main):
 def save_as_mainfile(filepath, copy=False, relative_remap=True, compress=False):
     with open(filepath, "w") as f:
         json.dump({"fake_blend": True, "from": current["file"],
-                   "libraries": [l.filepath for l in bpy.data.libraries],
+                   "libraries": [("%d|" % bpy.data.libraries.index(l.parent) if l.parent else "") + l.filepath
+                                 for l in bpy.data.libraries],
                    "images": [[i.filepath, bool(i.packed_file), i.source] for i in bpy.data.images]}, f)
     return {"FINISHED"}
 

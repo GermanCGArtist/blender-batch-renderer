@@ -29,6 +29,9 @@ from .parse import parse_marker
 from .process import BlenderProcess
 from .storage import atomic_write_json, read_json
 
+# Raise when the job copy changes in a way workers depend on: older copies are then made again.
+PACKAGE_FORMAT = 2       # 2: indirectly linked libraries point next to their parent in libs/
+
 _manifests: "OrderedDict[str, dict]" = OrderedDict()
 _mlock = threading.Lock()
 
@@ -199,7 +202,7 @@ def build_package(job, inst, on_line, frames: Optional[List[int]] = None) -> dic
     with _mlock:
         _manifests[version] = manifest
     summary = {
-        "hash": version, "built_at": time.time(), "blend_stamp": stamp_before,
+        "hash": version, "built_at": time.time(), "blend_stamp": stamp_before, "format": PACKAGE_FORMAT,
         "blender": f"{inst.version[0]}.{inst.version[1]}", "blender_label": inst.label,
         "scene_info": si, "addons": r.get("addons") or [], "addons_required": r.get("addons_required") or [],
         "libraries": r.get("libraries") or [], "warnings": r.get("warnings") or [],
@@ -248,6 +251,8 @@ def package_current(job) -> bool:
     pkg = job.package or {}
     if not pkg.get("hash") or pkg.get("blend_stamp") != job.current_blend_stamp():
         return False
+    if pkg.get("format") != PACKAGE_FORMAT:
+        return False                    # made by an older version of the app
     for lib in pkg.get("libraries") or []:
         try:
             st = os.stat(lib["path"])
