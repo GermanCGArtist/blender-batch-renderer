@@ -11,6 +11,7 @@ same scheduler, so this computer is simply one more machine.
 """
 from __future__ import annotations
 
+import os
 import platform
 import socket
 import threading
@@ -72,6 +73,8 @@ class Machine:
     state: str = "idle"                   # idle / downloading / loading / rendering / error / offline
     note: str = ""
     live: dict = field(default_factory=dict)
+    rate: float = 0.0                     # measured transfer speed to this machine (bytes/s), 0 = unknown
+    protocol: int = 0
     excluded_jobs: Dict[str, str] = field(default_factory=dict)   # job id -> reason (this batch)
     batch: dict = field(default_factory=lambda: {"frames": 0, "failed": 0, "render_s": 0.0, "bytes": 0})
     total: dict = field(default_factory=lambda: {"frames": 0, "failed": 0, "render_s": 0.0, "bytes": 0})
@@ -105,6 +108,9 @@ class Scheduler:
         self.request_package: Optional[Callable[[Job], None]] = None   # runner builds packages
         self.on_job_complete: Optional[Callable[[Job], None]] = None   # runner finalizes jobs
         self.local_busy_job: Optional[str] = None
+        self.probes: Dict[tuple, dict] = {}       # (job id, machine id) -> {"frame", "ref", "started", "state"}
+        self.on_probe_uploaded: Optional[Callable] = None    # runner compares the images
+        self._pkg_ok: Dict[str, tuple] = {}
         self._finalizing = set()
         self.local = Machine(id=LOCAL_ID, name=local_machine_name(), kind="local",
                              os=f"{platform.system()} {platform.release()}", last_seen=time.time())
@@ -218,6 +224,8 @@ class Scheduler:
         free = self.leasable(job)
         if not free:
             return None
+        if machine.kind != "local" and self._others_finish_first(job, machine, len(free)):
+            return None
         # prefer frames that did not already fail on this machine
         for f in free:
             rec = job.frames.get(str(f)) or {}
@@ -249,6 +257,12 @@ class Scheduler:
         pkg = job.package or {}
         if not pkg.get("hash"):
             return "package not built yet"
+        if pkg.get("unbaked") and m.kind != "local":
+            return "unbaked simulation (%s) – bake it to share this job" % "; ".join(pkg["unbaked"][:2])
+        ap = (job.approvals or {}).get(m.name)
+        if (ap and ap.get("ok") is False and ap.get("version") == pkg.get("hash")
+                and ap.get("device") == device_for(job, m.name) and job.settings.consistency_check):
+            return ap.get("reason") or "frames look different from the other computers"
         if job.id in m.excluded_jobs:
             return m.excluded_jobs[job.id]
         want = pkg.get("blender")
@@ -293,7 +307,7 @@ class Scheduler:
                 if pkg.get("error") and pkg.get("blend_stamp") == job.current_blend_stamp():
                     reasons.append(f"{job.name}: could not be prepared for other machines")
                     continue
-                if not pkg.get("hash") or pkg.get("blend_stamp") != job.current_blend_stamp():
+                if not self.package_ok(job):
                     if self.request_package:
                         self.request_package(job)
                     reasons.append(f"{job.name}: preparing the job for other machines")
@@ -302,10 +316,23 @@ class Scheduler:
                 if why:
                     reasons.append(f"{job.name}: {why}")
                     continue
-                f = self._pick_frame(job, m)
-                if f is None:
-                    continue
-                l = self._new_lease(job, f, mid)
+                probe = None
+                if job.settings.consistency_check:
+                    st, probe = self._consistency(job, m)
+                    if st == "wait":
+                        reasons.append(f"{job.name}: {probe}")
+                        continue
+                if probe is not None:
+                    f = probe
+                    l = Lease(job.id, f, mid, uuid.uuid4().hex[:10], time.time(), time.time() + LEASE_SECONDS)
+                else:
+                    f = self._pick_frame(job, m)
+                    if f is None:
+                        tail = self._tail_reason(job, m)
+                        if tail:
+                            reasons.append(f"{job.name}: {tail}")
+                        continue
+                    l = self._new_lease(job, f, mid)
                 if not job.blend_stamp or not job.count(F_DONE):
                     job.blend_stamp = pkg.get("blend_stamp")
                 if job.status != RENDERING:
@@ -321,7 +348,8 @@ class Scheduler:
                     "overrides": {"frame_start": s.frame_start, "frame_end": s.frame_end, "samples": s.samples,
                                   "resolution_pct": s.resolution_pct, "device": device_for(job, m.name)},
                     "frame_timeout_min": s.frame_timeout_min, "restart_every": s.restart_every,
-                    "abort_gen": self.abort_gen,
+                    "abort_gen": self.abort_gen, "transfer": s.transfer if s.transfer in ("smart", "full") else "smart",
+                    "probe": probe is not None,
                 }}
             return {"lease": None, "reason": "; ".join(reasons) or "no frames left to hand out"}
 
@@ -335,10 +363,141 @@ class Scheduler:
                     or self.compatible(job, m)):
                 return None
             m.last_seen = time.time()
+            if job.settings.consistency_check and m.kind != "local":
+                ap = (job.approvals or {}).get(m.name) or {}
+                if not ap.get("ok") or ap.get("version") != (job.package or {}).get("hash"):
+                    return None          # finish the check first
             f = self._pick_frame(job, m)
             if f is None:
                 return None
             return self._new_lease(job, f, mid).frame
+
+    # ---- job copy, transfer speed, "is it worth it" -------------------------------------------
+    def package_ok(self, job: Job) -> bool:
+        from .package import package_current
+        now = time.time()
+        c = self._pkg_ok.get(job.id)
+        if c and now - c[0] < 5 and c[2] == (job.package or {}).get("hash"):
+            return c[1]
+        ok = package_current(job)
+        self._pkg_ok[job.id] = (now, ok, (job.package or {}).get("hash"))
+        return ok
+
+    def invalidate_package(self, job: Job):
+        self._pkg_ok.pop(job.id, None)
+
+    def record_transfer(self, mid: str, nbytes: int, seconds: float):
+        if nbytes < (1 << 20) or seconds <= 0:
+            return
+        with self.lock:
+            m = self.machines.get(mid)
+            if m:
+                r = nbytes / seconds
+                m.rate = r if not m.rate else 0.7 * m.rate + 0.3 * r
+
+    def _others_finish_first(self, job: Job, m: Machine, n_free: int) -> bool:
+        """True when the other computers working on this job would finish all remaining frames
+        before this one finishes a single frame (render + sending its frame files)."""
+        rates = self.job_rates(job)
+        t_m = (1.0 / rates[m.name]) if rates.get(m.name) else None
+        if t_m is None:
+            return False                       # no experience yet: let it try
+        pkg = job.package or {}
+        if job.settings.transfer != "full" and pkg.get("stream_bytes_per_frame"):
+            t_m += pkg["stream_bytes_per_frame"] / (m.rate or 20e6)
+        others = 0.0
+        for x in self.machines.values():
+            if x.id == m.id or not x.online or not x.enabled or not rates.get(x.name):
+                continue
+            busy = (x.kind == "local" and self.local_busy_job == job.id) or any(
+                l.machine_id == x.id and l.job_id == job.id for l in self.leases.values())
+            if busy:
+                others += rates[x.name]
+        if not others:
+            return False
+        return n_free / others < t_m
+
+    def _tail_reason(self, job: Job, m: Machine) -> Optional[str]:
+        free = self.leasable(job)
+        if free and self._others_finish_first(job, m, len(free)):
+            return "the other computers finish the last frames sooner"
+        return None
+
+    # ---- consistency check ------------------------------------------------------------------
+    def _consistency(self, job: Job, m: Machine):
+        """('ok', None) / ('wait', reason) / ('probe', frame to render for the comparison)."""
+        if m.kind == "local":
+            return "ok", None
+        pkg = job.package or {}
+        ver = pkg.get("hash")
+        dev = device_for(job, m.name)
+        aps = job.approvals if job.approvals is not None else {}
+        ap = aps.get(m.name) or {}
+        if ap.get("ok") and ap.get("version") == ver and ap.get("device") == dev:
+            return "ok", None
+        pr = self.probes.get((job.id, m.id))
+        if pr:
+            return "wait", "checking that its frames match the other computers (%s)" % pr["state"]
+        ref = next((n for n, a in aps.items() if a.get("reference") and a.get("version") == ver), None)
+        if ref is None:
+            done = sorted((r for r in job.done_records()), key=lambda r: r.get("finished_at") or 0)
+            if done:
+                ref = done[0].get("machine") or self.local.name
+            elif (self.settings.render_locally and device_for(job, self.local.name) != "off"
+                  and self.local_busy_job == job.id and not self.draining):
+                return "wait", f"waiting for the first frame from {self.local.name} to compare with"
+            else:
+                ref = m.name                      # nobody else renders it: this one is the reference
+            if True:
+                aps[ref] = {"ok": True, "reference": True, "version": ver, "device": device_for(job, ref),
+                            "at": time.time()}
+                job.approvals = aps
+                job.save()
+            if ref == m.name:
+                return "ok", None
+        cands = [r for r in job.done_records() if (r.get("machine") or self.local.name) == ref
+                 and r.get("path") and os.path.exists(r["path"])]
+        if not cands:
+            return "wait", f"waiting for a frame from {ref} to compare with"
+        r = sorted(cands, key=lambda r: r.get("finished_at") or 0)[-1]
+        self.probes[(job.id, m.id)] = {"frame": int(r["frame"]), "ref": ref, "ref_path": r["path"],
+                                       "started": time.time(), "state": "rendering a test frame",
+                                       "machine": m.name}
+        self.emit("message", {"level": "info", "job_id": job.id,
+                              "text": f"{job.name}: {m.name} first renders frame {r['frame']} to compare it "
+                                      f"with {ref}'s frame"})
+        return "probe", int(r["frame"])
+
+    def probe_for(self, job_id: str, mid: str, frame: int) -> Optional[dict]:
+        with self.lock:
+            pr = self.probes.get((job_id, mid))
+            return pr if pr and pr["frame"] == int(frame) else None
+
+    def probe_result(self, job: Job, mid: str, ok: bool, info: dict):
+        with self.lock:
+            pr = self.probes.pop((job.id, mid), None)
+            m = self.machines.get(mid)
+            name = m.name if m else mid
+            aps = job.approvals if job.approvals is not None else {}
+            reason = info.get("reason") or ""
+            aps[name] = {"ok": bool(ok), "version": (job.package or {}).get("hash"),
+                         "device": device_for(job, name), "diff": info.get("diff"), "ref": (pr or {}).get("ref"),
+                         "reason": reason, "image": info.get("image"), "at": time.time()}
+            job.approvals = aps
+            job.save()
+        if ok:
+            self.emit("message", {"level": "info", "job_id": job.id,
+                                  "text": f"{job.name}: {name}'s test frame matches – it joins in"})
+        else:
+            self.emit("message", {"level": "warn", "job_id": job.id,
+                                  "text": f"{job.name}: {name} left out – {reason}. Compare the images in "
+                                          f"data/consistency/; untick the consistency check in the job "
+                                          "settings to use it anyway."})
+        self.emit("machines", {})
+
+    def drop_probe(self, job_id: str, mid: str):
+        with self.lock:
+            self.probes.pop((job_id, mid), None)
 
     def lease_token(self, job_id: str, frame: int, mid: str) -> Optional[str]:
         with self.lock:
@@ -359,6 +518,9 @@ class Scheduler:
     def release_machine(self, mid: str, job_id: Optional[str] = None) -> List[int]:
         with self.lock:
             keys = [k for k, l in self.leases.items() if l.machine_id == mid and (job_id is None or k[0] == job_id)]
+            for k in [k for k, p in self.probes.items() if k[1] == mid and (job_id is None or k[0] == job_id)
+                      and p["state"] == "rendering a test frame"]:
+                del self.probes[k]
             for k in keys:
                 del self.leases[k]
             return [k[1] for k in keys]
@@ -458,6 +620,7 @@ class Scheduler:
             self.abort_gen += 1
             self.draining = True
             self.leases = {k: l for k, l in self.leases.items() if l.machine_id == LOCAL_ID}
+            self.probes = {k: p for k, p in self.probes.items() if p["state"] != "rendering a test frame"}
 
     def abort_job(self, job_id: str):
         with self.lock:
@@ -553,6 +716,10 @@ class Scheduler:
                 for m in self.machines.values():
                     if m.kind == "remote" and not m.online and m.state != "offline":
                         m.state = "offline"
+                for k, pr in list(self.probes.items()):
+                    mm = self.machines.get(k[1])
+                    if pr["state"].startswith("rendering") and (mm is None or not mm.online):
+                        del self.probes[k]
             for l in expired:
                 m = self.machines.get(l.machine_id)
                 self.emit("message", {"level": "warn", "job_id": l.job_id,

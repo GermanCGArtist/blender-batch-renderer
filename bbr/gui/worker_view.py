@@ -1,6 +1,7 @@
 """Worker mode: this computer renders frames for a coordinator."""
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -140,11 +141,21 @@ class WorkerView(QWidget):
         self.cache_gb.valueChanged.connect(self._cache_changed)
         self.b_clear = QPushButton("Clear")
         self.b_clear.clicked.connect(self._clear_cache)
+        self.b_cache_dir = QPushButton("Change folder…")
+        self.b_cache_dir.setToolTip("Where downloaded job files are kept – e.g. on a big second drive")
+        self.b_cache_dir.clicked.connect(self._change_cache_dir)
         r3.addWidget(self.cache, 1)
         r3.addWidget(QLabel("keep up to"))
         r3.addWidget(self.cache_gb)
         r3.addWidget(self.b_clear)
         g4l.addLayout(r3)
+        r4 = QHBoxLayout()
+        self.cache_where = QLabel()
+        self.cache_where.setStyleSheet("color: gray;")
+        self.cache_where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        r4.addWidget(self.cache_where, 1)
+        r4.addWidget(self.b_cache_dir)
+        g4l.addLayout(r4)
         split.addWidget(g4)
         outer.addWidget(split, 1)
 
@@ -288,6 +299,25 @@ class WorkerView(QWidget):
             self._last_cache = 0
         self.refresh()
 
+    def _change_cache_dir(self):
+        if self.busy:
+            return
+        from PySide6.QtWidgets import QFileDialog
+        old = self.worker.cache_dir if self.worker else None
+        d = QFileDialog.getExistingDirectory(self, "Folder for downloaded job files",
+                                             self.settings.worker_cache_dir or os.path.expanduser("~"))
+        if not d:
+            return
+        new = os.path.join(d, "BlenderBatchRenderer cache") if os.path.basename(d) != "BlenderBatchRenderer cache" else d
+        if old is not None and self.worker and self.worker.cache_usage() > 0:
+            r = QMessageBox.question(self, "Old cache", f"Delete the downloaded files in the old folder?\n{old}")
+            if r == QMessageBox.StandardButton.Yes:
+                self.worker.clear_cache()
+        self.settings.worker_cache_dir = new
+        self.settings.save()
+        self._last_cache = 0
+        self.refresh()
+
     def append_console(self, lines):
         if lines:
             self.console.appendPlainText("\n".join(lines))
@@ -303,7 +333,7 @@ class WorkerView(QWidget):
         rendering = st["current"] is not None
         # toggles are locked while a job is running
         for wdg in (self.accept, self.server, self.b_find, self.code, self.b_pair, self.b_forget, self.name,
-                    self.b_addons, self.b_clear, self.cache_gb):
+                    self.b_addons, self.b_clear, self.cache_gb, self.b_cache_dir):
             wdg.setEnabled(not busy)
         if self.b_addons.text() == "Checking…":
             self.b_addons.setEnabled(False)
@@ -396,3 +426,5 @@ class WorkerView(QWidget):
             self._last_cache = time.time()
             self._cache_text = f"Downloaded jobs: {fmt_bytes(w.cache_usage())}"
         self.cache.setText(self._cache_text)
+        if w:
+            self.cache_where.setText(str(w.cache_dir))

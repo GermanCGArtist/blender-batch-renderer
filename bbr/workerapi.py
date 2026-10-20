@@ -29,7 +29,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import __version__
+import hashlib
+
+from . import __version__, PROTOCOL
 from .models import F_DONE, Job
 from . import reports
 
@@ -97,6 +99,14 @@ class WorkerEndpoints:
     def handle(self, h, method: str, path: str, q: dict):
         """Called by the API handler for /api/v1/worker/... Writes the response itself."""
         sub = path[len("/api/v1/worker/"):].strip("/")
+        proto = h.headers.get("X-BBR-Protocol") or "1"
+        if proto != str(PROTOCOL):
+            # drain a request body so the error reaches the other side cleanly
+            n = int(h.headers.get("Content-Length") or 0)
+            if 0 < n <= MAX_UPLOAD:
+                h.rfile.read(n)
+            raise WorkerError(426, f"version mismatch: this computer (the coordinator) runs Blender Batch Renderer "
+                                   f"{__version__}; update the worker to the same version")
         if sub == "pair" and method == "POST":
             return h._json(200, self.pair(h._body()))
         if not self.authorized(h.headers):
@@ -110,7 +120,8 @@ class WorkerEndpoints:
             m = self.sched.register(info)
             self.sched._persist()
             return h._json(200, {"ok": True, "id": m.id, "name": m.name, "enabled": m.enabled,
-                                 "coordinator": self.sched.local.name, "app_version": __version__})
+                                 "coordinator": self.sched.local.name, "app_version": __version__,
+                                 "protocol": PROTOCOL})
         if sub == "heartbeat" and method == "POST":
             b = h._body()
             return h._json(200, self.sched.heartbeat(mid, str(b.get("state", "")), b.get("live"),
@@ -126,6 +137,7 @@ class WorkerEndpoints:
             b = h._body()
             job = self._job(str(b.get("job_id", "")))
             reason = str(b.get("reason", "cannot render this job"))[:300]
+            self.sched.drop_probe(job.id, mid)
             self.sched.exclude(mid, job, reason)
             m = self.sched.machines.get(mid)
             self.runner._msg("warn", f"{job.name}: {m.name if m else mid} cannot render it – {reason}", job)
@@ -148,9 +160,20 @@ class WorkerEndpoints:
                     m.state = "offline"
             self.sched.emit("machines", {})
             return h._json(200, {"ok": True})
-        m = re.match(r"^package/([\w-]+)/(\w+)$", sub)
+        if sub == "note" and method == "POST":
+            b = h._body()
+            job = self.queue.find(str(b.get("job_id", "")))
+            mm = self.sched.machines.get(mid)
+            lvl = b.get("level") if b.get("level") in ("info", "warn", "error") else "info"
+            self.runner._msg(lvl, f"{job.name + ': ' if job else ''}{mm.name if mm else mid}: "
+                                  f"{str(b.get('text', ''))[:500]}", job)
+            return h._json(200, {"ok": True})
+        m = re.match(r"^manifest/([\w-]+)/(\w+)$", sub)
         if m and method == "GET":
-            return self.send_package(h, m.group(1), m.group(2))
+            return self.send_manifest(h, m.group(1), m.group(2))
+        m = re.match(r"^file/([\w-]+)/(\w+)$", sub)
+        if m and method == "GET":
+            return self.send_file(h, mid, m.group(1), m.group(2), (q.get("path") or [""])[0])
         m = re.match(r"^(frame|extra)/([\w-]+)/(-?\d+)$", sub)
         if m and method == "PUT":
             return self.receive(h, mid, m.group(1), m.group(2), int(m.group(3)), q)
@@ -162,51 +185,96 @@ class WorkerEndpoints:
             raise WorkerError(404, "this job is no longer in the coordinator's queue")
         return j
 
-    # ---- packages ---------------------------------------------------------------
-    def send_package(self, h, job_id: str, digest: str):
-        from .package import package_file
+    # ---- job copies ---------------------------------------------------------------
+    def _current(self, job_id: str, version: str):
+        from .package import worker_manifest
         job = self._job(job_id)
-        p = package_file(job)
-        if p is None or (job.package or {}).get("hash") != digest:
-            raise WorkerError(410, "this package is outdated – ask for a new lease")
-        size = p.stat().st_size
+        if (job.package or {}).get("hash") != version or not self.sched.package_ok(job):
+            if (job.package or {}).get("hash") and self.runner.request_package:
+                self.sched.invalidate_package(job)
+            raise WorkerError(410, "the job copy changed – ask for a new lease")
+        return job
+
+    def send_manifest(self, h, job_id: str, version: str):
+        from .package import worker_manifest
+        job = self._current(job_id, version)
+        m = worker_manifest(job)
+        if m is None:
+            raise WorkerError(410, "the job copy is gone – ask for a new lease")
+        return h._json(200, m)
+
+    def send_file(self, h, mid: str, job_id: str, version: str, path: str):
+        from .package import load_manifest
+        from .hashing import shared as hash_cache
+        job = self._current(job_id, version)
+        man = load_manifest(job)
+        e = (man or {}).get("files", {}).get(path)
+        if e is None:
+            raise WorkerError(404, f"not part of this job: {path}")
+        src = e["src"]
+        try:
+            st = os.stat(src)
+        except OSError:
+            raise WorkerError(410, f"file missing on the coordinator: {os.path.basename(src)}")
+        if st.st_size != e["size"] or (e["kind"] != "scene" and st.st_mtime_ns != e["mtime_ns"]):
+            # changed since the job copy was made: make a new one
+            self.sched.invalidate_package(job)
+            job.package = dict(job.package or {}, blend_stamp=None)
+            raise WorkerError(410, f"{os.path.basename(src)} changed – the job copy is being renewed")
+        digest = hash_cache().get(src)
+        if e.get("hash") and digest != e["hash"]:
+            self.sched.invalidate_package(job)
+            job.package = dict(job.package or {}, blend_stamp=None)
+            raise WorkerError(410, f"{os.path.basename(src)} changed – the job copy is being renewed")
+        body = None
+        encoding = "identity"
+        if "zstd" in (h.headers.get("X-BBR-Accept") or "") and st.st_size <= (256 << 20):
+            body = _maybe_compress(src)
+            if body is not None:
+                encoding = "zstd"
         start = 0
-        rng = h.headers.get("Range") or ""
-        mr = re.match(r"bytes=(\d+)-$", rng.strip())
-        if mr:
-            start = min(int(mr.group(1)), size)
+        if body is None:
+            mr = re.match(r"bytes=(\d+)-$", (h.headers.get("Range") or "").strip())
+            if mr:
+                start = min(int(mr.group(1)), st.st_size)
+        length = len(body) if body is not None else st.st_size - start
         h.send_response(206 if start else 200)
-        h.send_header("Content-Type", "application/zip")
-        h.send_header("Content-Length", str(size - start))
+        h.send_header("Content-Type", "application/octet-stream")
+        h.send_header("Content-Length", str(length))
+        h.send_header("X-BBR-SHA256", digest)
+        h.send_header("X-BBR-Size", str(st.st_size))
+        h.send_header("X-BBR-Encoding", encoding)
         h.send_header("Accept-Ranges", "bytes")
         if start:
-            h.send_header("Content-Range", f"bytes {start}-{size - 1}/{size}")
+            h.send_header("Content-Range", f"bytes {start}-{st.st_size - 1}/{st.st_size}")
         h.end_headers()
-        with self.sched.lock:
-            mach = self.sched.machines.get(h.headers.get("X-BBR-Machine") or "")
-            if mach:
-                mach.state = "downloading"
-        with open(p, "rb") as f:
-            f.seek(start)
-            while True:
-                chunk = f.read(1 << 20)
-                if not chunk:
-                    break
-                try:
-                    h.wfile.write(chunk)
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    return
+        t0 = time.time()
+        try:
+            if body is not None:
+                h.wfile.write(body)
+            else:
+                with open(src, "rb") as f:
+                    f.seek(start)
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        h.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        self.sched.record_transfer(mid, length, time.time() - t0)
 
     # ---- results ----------------------------------------------------------------
-    def _read_body_to(self, h, dest: Path) -> int:
+    def _read_body(self, h, folder: Path, name: str):
+        """Read an upload into a temporary file next to its destination and check its checksum.
+        Returns (temp path, size)."""
         n = int(h.headers.get("Content-Length") or -1)
         if n < 0:
             raise WorkerError(411, "Content-Length required")
         if n > MAX_UPLOAD:
             raise WorkerError(413, "file too large")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.parent / f".tmp_up_{secrets.token_hex(4)}_{dest.name}"
+        want = (h.headers.get("X-BBR-SHA256") or "").lower()
+        folder.mkdir(parents=True, exist_ok=True)
+        tmp = folder / f".tmp_up_{secrets.token_hex(4)}_{name}"
         left = n
+        hs = hashlib.sha256()
         try:
             with open(tmp, "wb") as f:
                 while left > 0:
@@ -214,27 +282,36 @@ class WorkerEndpoints:
                     if not chunk:
                         raise WorkerError(400, "upload interrupted")
                     f.write(chunk)
+                    hs.update(chunk)
                     left -= len(chunk)
-            os.replace(tmp, dest)
-        finally:
-            if tmp.exists():
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
-        return n
+            if want and hs.hexdigest() != want:
+                raise WorkerError(422, "checksum mismatch – the file was damaged on the way, send it again")
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return tmp, n
 
     def receive(self, h, mid: str, kind: str, job_id: str, frame: int, q: dict):
         job = self._job(job_id)
+        probe = self.sched.probe_for(job.id, mid, frame) if kind == "frame" else None
         rec = job.frames.get(str(frame)) or {}
-        if rec.get("status") == F_DONE:
+        if rec.get("status") == F_DONE and probe is None:
             # another machine was faster (e.g. after this one dropped off Wi-Fi): drop the upload
-            h.rfile.read(int(h.headers.get("Content-Length") or 0))
+            n = int(h.headers.get("Content-Length") or 0)
+            while n > 0:
+                got = h.rfile.read(min(n, 1 << 20))
+                if not got:
+                    break
+                n -= len(got)
             return h._json(409, {"error": "frame already done", "duplicate": True})
-        from .scheduler import LOCAL_ID  # noqa: F401
         if kind == "extra":
             rel = _safe_rel((q.get("path") or [""])[0])
-            self._read_body_to(h, job.frames_dir / rel)
+            dest = job.frames_dir / rel
+            tmp, _n = self._read_body(h, dest.parent, dest.name)
+            os.replace(tmp, dest)
             return h._json(200, {"ok": True})
         name = _safe_rel((q.get("name") or [""])[0])
         if "/" in name:
@@ -243,14 +320,31 @@ class WorkerEndpoints:
             meta = json.loads(h.headers.get("X-BBR-Meta") or "{}")
         except ValueError:
             meta = {}
-        dest = job.frames_dir / name
-        size = self._read_body_to(h, dest)
         m = self.sched.machines.get(mid)
         mname = m.name if m else mid
+        if probe is not None:
+            folder = job.data_dir / "consistency"
+            tmp, size = self._read_body(h, folder, name)
+            safe = re.sub(r"[^\w.-]+", "_", mname)
+            dest = folder / f"{safe}_{name}"
+            os.replace(tmp, dest)
+            with self.sched.lock:
+                probe["state"] = "comparing"
+            self.sched.emit("machines", {})
+            if self.sched.on_probe_uploaded:
+                self.sched.on_probe_uploaded(job, mid, str(dest), probe["ref_path"])
+            return h._json(202, {"ok": True, "probe": True})
+        dest = job.frames_dir / name
+        tmp, size = self._read_body(h, job.frames_dir, name)
         with self.sched.lock:
             rec = job.frames.setdefault(str(frame), {"attempts": 0})
-            if rec.get("status") == F_DONE:          # raced with another upload
+            if rec.get("status") == F_DONE:          # raced with another upload: keep the first one
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
                 return h._json(409, {"error": "frame already done", "duplicate": True})
+            os.replace(tmp, dest)
             rec.update({
                 "status": F_DONE,
                 "attempts": int(rec.get("attempts", 0)) + 1,
@@ -259,7 +353,7 @@ class WorkerEndpoints:
                 "finished_at": time.time(),
                 "blender_peak_mb": meta.get("peak_mb"), "process_peak_mb": meta.get("process_peak_mb"),
                 "samples": meta.get("samples"), "stats": str(meta.get("stats", ""))[:300],
-                "machine": mname, "upload_s": meta.get("upload_s"),
+                "machine": mname, "upload_s": meta.get("upload_s"), "fetch_s": meta.get("fetch_s"),
             })
             rec.pop("last_error", None)
             self.queue.save_job(job)
@@ -274,6 +368,12 @@ class WorkerEndpoints:
         job = self._job(str(b.get("job_id", "")))
         frame = int(b.get("frame"))
         err = str(b.get("error", "failed"))[:500]
+        if self.sched.probe_for(job.id, mid, frame):
+            self.sched.drop_probe(job.id, mid)
+            self.runner._msg("warn", f"{job.name}: the test frame failed on "
+                                     f"{self.sched.machines[mid].name if mid in self.sched.machines else mid}: {err}",
+                             job)
+            return {"status": "probe failed"}
         if (job.frames.get(str(frame)) or {}).get("status") == F_DONE:
             return {"status": F_DONE}
         status = self.sched.frame_failed(mid, job, frame, err)
@@ -288,6 +388,35 @@ class WorkerEndpoints:
                                      f"{job.settings.max_attempts}): {err}", job)
         reports.append_frame(job, frame, rec, 0)
         return {"status": status}
+
+
+_COMPRESS_DECISION = {}
+
+
+def _maybe_compress(path: str):
+    """zstd-compressed bytes if that makes the file at least 10 % smaller, else None."""
+    try:
+        import zstandard
+    except ImportError:
+        return None
+    try:
+        st = os.stat(path)
+        key = (path, st.st_size, st.st_mtime_ns)
+        if _COMPRESS_DECISION.get(key) is False:
+            return None
+        with open(path, "rb") as f:
+            head = f.read(1 << 20)
+            if len(zstandard.ZstdCompressor(level=1).compress(head)) > 0.9 * len(head):
+                _COMPRESS_DECISION[key] = False
+                return None
+            data = head + f.read()
+        out = zstandard.ZstdCompressor(level=3).compress(data)
+        if len(out) > 0.9 * len(data):
+            _COMPRESS_DECISION[key] = False
+            return None
+        return out
+    except OSError:
+        return None
 
 
 # ---- finding the coordinator on the home network ----------------------------------

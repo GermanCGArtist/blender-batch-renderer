@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(HERE, "Blender_Batch_Renderer_Documentation.pdf")
 ICON = os.path.join(ROOT, "bbr", "assets", "icon.png")
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 F = "/usr/share/fonts/truetype/dejavu/"
 G = "/usr/share/fonts/truetype/google-fonts/"
@@ -722,6 +722,9 @@ def build():
         ["Check the file first", "off", "Run the preflight check (chapter 12) before the first render of the job."],
         ["Other computers don't need this job's add-ons", "off", "Workers render the job even without the add-ons "
                                                                  "it seems to use (15.2)."],
+        ["Transfer to other computers", "Smart", "Smart: files once, frame files when needed; Full copy: "
+                                                 "everything before the first frame (15.3)."],
+        ["Check that other computers' frames look the same", "on", "Test frame before a computer joins (15.4)."],
         ["Device per computer", "as saved in the file", "For each computer: GPU, CPU, or Off (never renders this "
                                                         "job). Cycles only (15.2)."],
     ], [44, 30, 96]))
@@ -743,7 +746,8 @@ def build():
         ["Share jobs with worker computers", "off", "Machines tab: other computers may render frames of the queue."],
         ["This computer renders too", "on", "Machines tab: off = the coordinator only hands out frames."],
         ["Pairing code", "random", "Machines tab: 6 digits a new worker enters once; <i>New code</i> for new workers."],
-        ["Worker: keep downloaded jobs up to", "50 GB", "Worker window: size of the cache of job copies (15.6)."],
+        ["Worker: keep downloaded jobs up to", "50 GB", "Worker window: size of the cache of job copies (15.8)."],
+        ["Worker: folder for downloaded files", "app data folder", "Worker window: <i>Change folder…</i> (15.8)."],
     ], [52, 34, 84]))
     s.append(H2("9.3  What the app changes in your file"))
     s.append(P("Only in the background Blender session – <b>the .blend file itself is never saved or modified</b>:"))
@@ -798,7 +802,7 @@ def build():
                "<font face='Mono'>settings.json</font> (installs and defaults), <font face='Mono'>queue.json</font> "
                "(folders and the order of job folders) and <font face='Mono'>app.lock</font>. On a worker it also "
                "holds <font face='Mono'>worker_cache/</font> (downloaded job copies) and "
-               "<font face='Mono'>worker_logs/</font> (15.6). Everything about a job lives in its own job folder."))
+               "<font face='Mono'>worker_logs/</font> (15.8). Everything about a job lives in its own job folder."))
 
     # 11 ---------------------------------------------------------------
     s.append(H1("11  Preview video"))
@@ -944,11 +948,10 @@ curl -X POST -H "X-BBR-Request: 1" \\
                   "On a worker, use <i>Pause after this frame</i> or <i>Stop now</i> instead.", "Locked while rendering"))
     s.append(H2("15.2  What happens"))
     s += bullets([
-        "<b>The job copy.</b> Before the first worker renders a job, the coordinator makes a self-contained copy: "
-        "the .blend with its textures packed, every <b>linked library</b> (also libraries linked by libraries), and "
-        "external files that cannot be packed (image sequences, movies, Alembic/USD caches, VDB volumes). The "
-        "copy is zipped once per version of the .blend; your original files are not changed. Each worker downloads "
-        "it once (the download resumes after a dropped connection) and keeps it in its cache.",
+        "<b>The job's files.</b> Before the first worker renders a job, the coordinator lists every file the job "
+        "needs and writes copies of the .blend and of every <b>linked library</b> (also libraries linked by "
+        "libraries) whose paths point to those files. Your original files are not changed. The files are sent one "
+        "by one, each with a checksum (section 15.3).",
         "<b>Frames, not ranges.</b> Workers ask for one frame at a time and keep Blender open between frames, "
         "so a fast PC simply renders more frames than a laptop. Each frame is <i>leased</i> to one machine; while "
         "a worker sends its heartbeat every few seconds, the lease stays valid.",
@@ -967,7 +970,47 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "VRAM than the PC has renders on the Mac's GPU and is switched off for the PC. <i>GPU</i> uses the GPU set "
         "in that computer's Blender preferences, or the first one found.",
     ])
-    s.append(H2("15.3  Stopping, failures and lost machines"))
+    s.append(H2("15.3  Sending the files"))
+    s.append(table([
+        ["Group", "Examples", "Sent"],
+        ["Scene", "the .blend and its linked libraries", "before the first frame; only changed files when you save again"],
+        ["Assets", "textures, HDRIs, UDIM tiles, Alembic/USD, single VDBs, movies, fonts",
+         "once; kept on the worker by checksum and reused by every job that uses them"],
+        ["Frame files", "image sequences, VDB sequences, simulation and fluid caches on disk",
+         "<b>Smart</b>: only the files a frame needs, just before it renders (the next frame's files load while "
+         "the current one renders), deleted afterwards. <b>Full copy</b>: all before the first frame."],
+    ], [26, 64, 80]))
+    s += bullets([
+        "<b>Transfer to other computers</b> (job setting): <i>Smart</i> (default) or <i>Full copy</i>. Only frame "
+        "files the job's frame range actually uses are sent at all. For caches, the neighbouring frames are "
+        "included, because motion blur reads them.",
+        "<b>Automatic fallback.</b> After opening the job, the worker's Blender checks every file the scene refers "
+        "to. If something is missing, or Blender reports that it cannot read a file while rendering a frame, the "
+        "worker switches that job to Full copy and renders the frame again. Such a frame is never delivered or "
+        "counted as failed, and the coordinator shows a message.",
+        "<b>Checksums.</b> Every file is checked after transfer, in both directions. A damaged download is fetched "
+        "again (three times at most); a damaged frame is sent again. The coordinator remembers checksums and reads a "
+        "file again only when its size or date changes. A file that changes during the batch makes the coordinator "
+        "renew the job's file list.",
+        "<b>Compression</b> only where it helps: a file that does not shrink by at least 10 % (EXR, PNG, VDB, "
+        "Alembic …) is sent as it is.",
+        "<b>Version check.</b> Coordinator and workers must run the same version of the app; another version is "
+        "refused with a clear message.",
+        "<b>Unbaked simulations</b> can come out differently on another computer – such jobs stay on the "
+        "coordinator until they are baked.",
+    ])
+    s.append(H2("15.4  Consistency check and the last frames"))
+    s.append(P("With <i>Check that other computers' frames look the same</i> (job setting, on by default), a computer "
+               "that joins a job first renders a frame that is already finished. The coordinator compares the two "
+               "images in Blender, block by block, so render noise – which differs between CPU, GPU and GPU makers – "
+               "averages out, while a missing add-on effect, other colours or missing textures stand out. A computer "
+               "whose frame differs is left out of that job; its test frame is kept in "
+               "<font face='Mono'>data/consistency/</font>. Untick the setting to use it anyway. The check runs again "
+               "when the job's files or the computer's device setting change."))
+    s.append(P("<b>Is it worth it?</b> A computer gets no more frames of a job when the others would finish all "
+               "remaining frames before it finishes one (its render time plus moving that frame's files). So a slow "
+               "laptop does not hold up the end of a job."))
+    s.append(H2("15.5  Stopping, failures and lost machines"))
     s.append(table([
         ["Situation", "What happens"],
         ["Stop after frame", "Every machine finishes and delivers the frame it is working on, then the batch stops."],
@@ -979,13 +1022,14 @@ curl -X POST -H "X-BBR-Request: 1" \\
                                                           "into the pool. A frame it finishes later is still "
                                                           "accepted if nobody delivered it meanwhile."],
         ["The coordinator quits", "Workers finish their frame and keep it until the coordinator is back, then deliver it."],
-        ["The .blend is saved again", "A new job copy is made for new frames; the usual on-hold rule (7.2) applies."],
+        ["The .blend or a library is saved again", "A new file list is made; workers fetch only the changed files. "
+                                                   "The usual on-hold rule (7.2) applies."],
     ], [52, 118]))
-    s.append(H2("15.4  Statistics"))
+    s.append(H2("15.6  Statistics"))
     s += bullets([
         "<b>Machines tab</b> (coordinator): per machine its state, what it is rendering (frame, samples, Blender's "
         "remaining time), device, Blender versions and add-ons, frames this batch, average frame time, failed "
-        "attempts, data, and all-time totals; above the table the combined figures and the speed of all machines "
+        "attempts, data with the measured transfer speed, and all-time totals; above the table the combined figures and the speed of all machines "
         "together (frames per hour). Untick a machine to leave it out (when no batch is running).",
         "<b>Live tab</b>: frames per machine for the selected job, which frames are being rendered where, and the "
         "size of the job copy. Time remaining uses the combined speed of all machines that can render the job.",
@@ -996,20 +1040,22 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "remaining time, memory and device; downloads; the Blender console.",
         "<b>Status page</b>: a Machines section with the same per-machine and combined figures.",
     ])
-    s.append(H2("15.5  Security"))
+    s.append(H2("15.7  Security"))
     s.append(P("Sharing makes the app reachable on the home network. Workers need the key they received when "
                "pairing (the pairing code only works while sharing is on, and repeated wrong codes are blocked). "
                "Without that key, nothing can be downloaded or uploaded. The status page still needs its own key for "
                "other devices. Use the app only on networks you trust; for working away from home use a VPN such "
                "as Tailscale."))
-    s.append(H2("15.6  Where the files are"))
+    s.append(H2("15.8  Where the files are"))
     s.append(table([
         ["What", "Where"],
-        ["Job copy on the coordinator", "<font face='Mono'>&lt;job folder&gt;/package/&lt;code&gt;.zip</font> – rebuilt "
-                                        "when the .blend is saved again; can be deleted after the job."],
-        ["Job copies on a worker", "<font face='Mono'>worker_cache/&lt;code&gt;/</font> in the app data folder (10.3): "
-                                   "main.blend, libs/, files/. The oldest are removed when the size limit is reached; "
-                                   "<i>Clear</i> empties it."],
+        ["Job files on the coordinator", "<font face='Mono'>&lt;job folder&gt;/package/v_&lt;version&gt;/</font> – "
+                                         "the .blend copies and the file list; renewed when the scene changes."],
+        ["Files on a worker", "<font face='Mono'>worker_cache/</font> in the app data folder (10.3), or the folder "
+                              "chosen with <i>Change folder…</i>: <font face='Mono'>store/</font> (files by checksum), "
+                              "<font face='Mono'>jobs/</font> (each job's layout, linked to the store). The longest "
+                              "unused files are removed when the size limit is reached; <i>Clear</i> empties it. "
+                              "On Windows, choose a short folder (e.g. D:\\bbr) if file names are long."],
         ["Frames on their way", "<font face='Mono'>worker_cache/work/&lt;job&gt;/</font> – deleted once the coordinator "
                                 "has confirmed each frame."],
         ["Worker crash logs", "<font face='Mono'>worker_logs/</font> in the app data folder."],
@@ -1045,7 +1091,9 @@ curl -X POST -H "X-BBR-Request: 1" \\
         ["BBR_NEED_FRAME", "Blender asks which frame to render next; the app answers on Blender's input with "
                            "<font face='Mono'>FRAME n</font> or <font face='Mono'>DONE</font>. This is how frames are "
                            "shared between machines while Blender stays open."],
-        ["BBR_PACKAGE / BBR_ADDONS", "Result of making a job copy / list of enabled add-ons."],
+        ["BBR_PACKAGE / BBR_ADDONS", "The job's file list / list of enabled add-ons."],
+        ["BBR_INPUT_MISSING", "A worker's Blender misses files the scene needs (triggers Full copy)."],
+        ["BBR_COMPARE", "Result of comparing two renders (consistency check)."],
     ], [48, 122]))
     s.append(P("Blender versions up to 4.x also print their own status lines (<font face='Mono'>Fra:… | Time:… | "
                "Remaining:… | Sample …</font>); these are read as well."))
@@ -1082,7 +1130,9 @@ curl -X POST -H "X-BBR-Request: 1" \\
         ["bbr/gui/api_bridge.py", "Runs API requests on the window's thread."],
         ["bbr/scheduler.py", "Leases: which machine renders which frame; machines and their statistics."],
         ["bbr/workerapi.py, bbr/worker.py", "Coordinator endpoints for workers and discovery; the worker client."],
-        ["bbr/package.py", "Makes the self-contained job copy (with blender_scripts/bbr_package.py)."],
+        ["bbr/package.py", "The job's file list and frame mapping (with blender_scripts/bbr_package.py)."],
+        ["bbr/hashing.py", "Checksums, remembered until a file changes."],
+        ["blender_scripts/bbr_compare.py", "Compares two renders for the consistency check."],
         ["bbr/gui/machines_view.py, worker_view.py", "Machines tab; the window in worker mode."],
         ["blender_addon/", "The “Send to Batch Renderer” add-on for Blender."],
         ["bbr.spec, build_app.command", "Building the trimmed macOS app."],
@@ -1149,9 +1199,9 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "Unbaked simulations may differ after a resume – bake them first.",
         "Each Blender start loads your add-ons; slow add-ons add time to every start (and every planned restart).",
         "Only the active scene of a file is rendered; put view layers you want separately into separate files.",
-        "Several computers: simulation caches on disk (and fluid caches) are not included in the job copy yet – "
-        "bake them into the file or render such jobs on the coordinator. Third-party render engines are not "
-        "supported for sharing yet. Add-ons are detected by heuristics; a scene that uses an add-on only through "
+        "Several computers: unbaked simulations are not shared; geometry-nodes bakes and image sequences used "
+        "in unusual places (e.g. a geometry-nodes Image Texture) are sent completely instead of frame by frame. "
+        "Third-party render engines are not supported for sharing yet. Add-ons are detected by heuristics; a scene that uses an add-on only through "
         "a driver or script may not be recognised.",
     ])
     s.append(H2("Testing"))
@@ -1164,7 +1214,9 @@ curl -X POST -H "X-BBR-Request: 1" \\
                "simulates a coordinator with workers: job copies with nested linked libraries and add-on detection, "
                "pairing and access checks, discovery, faster and slower workers, a missing add-on, crashing "
                "workers, a worker that disappears, stop now / stop after frame, and the coordinator rendering "
-               "together with a worker."))
+               "together with a worker. <font face='Mono'>python3 tests/test_transfer.py</font> tests the file "
+               "transfer: Smart transfer and reuse across jobs, damaged downloads and uploads, the switch to Full "
+               "copy, the version check, the consistency check, the last-frames rule and remembered checksums."))
 
     return s
 

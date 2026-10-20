@@ -160,7 +160,7 @@ class Controller:
         s = JobSettings.from_dict(self.settings.defaults)
         for k in ("frame_start", "frame_end", "samples", "resolution_pct", "max_attempts", "retry_delay_s",
                   "frame_timeout_min", "make_preview", "preflight", "restart_every", "blender",
-                  "ignore_addons"):
+                  "ignore_addons", "transfer", "consistency_check"):
             if k in data and data[k] is not None:
                 setattr(s, k, data[k])
         gid = ""

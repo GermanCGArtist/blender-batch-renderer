@@ -60,7 +60,7 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": APP,
         "CFBundleDisplayName": APP,
-        "CFBundleShortVersionString": "0.4.0",
+        "CFBundleShortVersionString": "0.5.0",
         # double-clicking a .bbrqueue file opens it in the app
         "CFBundleDocumentTypes": [{
             "CFBundleTypeName": "Batch Renderer Queue",

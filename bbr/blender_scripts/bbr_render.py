@@ -38,6 +38,13 @@ def main():
     if redirected:
         C.warn("Compositor File Output nodes redirected into frames/<node name>/: " + ", ".join(redirected))
 
+    ci = args.get("check_inputs")
+    if ci is not None:
+        missing = C.missing_inputs(ci.get("ignore") or [])
+        if missing:
+            C.out("INPUT_MISSING", {"files": missing[:50]})
+            sys.exit(5)
+
     if scene.camera is None and not any(m.camera for m in scene.timeline_markers):
         C.out("FATAL", {"error": "Scene '%s' has no active camera" % scene.name})
         sys.exit(4)

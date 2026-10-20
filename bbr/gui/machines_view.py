@@ -15,7 +15,7 @@ from ..parse import fmt_duration, fmt_bytes
 STATE_COLORS = {"rendering": "#3d8bfd", "downloading": "#c678dd", "loading": "#7aa2f7", "idle": "#2fa84f",
                 "paused": "#e67e22", "error": "#dc3545", "offline": "#888888"}
 COLS = ["On", "Machine", "State", "Working on", "Device", "Blender / add-ons", "Frames", "Avg frame",
-        "Failed", "Data", "All time"]
+        "Failed", "Data (speed)", "All time"]
 
 
 def _state_text(m: dict) -> str:
@@ -184,7 +184,8 @@ class MachinesPanel(QWidget):
                 str(b["frames"]),
                 fmt_duration(b["avg_frame_s"]) if b.get("avg_frame_s") else "–",
                 str(b["failed"]) if b["failed"] else "",
-                fmt_bytes(b["bytes"]) if b["bytes"] else "",
+                (fmt_bytes(b["bytes"]) if b["bytes"] else "")
+                + (f"  ({fmt_bytes(m['rate'])}/s)" if m.get("rate") else ""),
                 f"{t['frames']} frames, {fmt_duration(t['render_s'])}" if t["frames"] else ""]
         self.table.setItem(r, 0, on)
         for c, v in enumerate(vals[1:], 1):
@@ -250,7 +251,8 @@ class MachinesPanel(QWidget):
 def job_machines_text(sched, job) -> str:
     """'PC 30 (avg 12 s) · MacBook 10 (avg 41 s)' for the Live tab."""
     stats = sched.job_machine_stats(job)
-    if not stats or (len(stats) == 1 and stats[0]["machine"] == sched.local.name and not stats[0]["failed_attempts"]):
+    if (not stats or (len(stats) == 1 and stats[0]["machine"] == sched.local.name and not stats[0]["failed_attempts"])) \
+            and not job.approvals and not any(k[0] == job.id for k in sched.probes):
         return ""
     out = []
     for d in stats:
@@ -264,6 +266,13 @@ def job_machines_text(sched, job) -> str:
         now = [f"{sched.machines[l.machine_id].name}: {l.frame}" for l in sched.leases.values()
                if l.job_id == job.id and l.machine_id in sched.machines]
     s = " · ".join(out)
+    for name, ap in sorted((job.approvals or {}).items()):
+        if ap.get("ok") is False and job.settings.consistency_check:
+            s += f"\n{name} left out: {ap.get('reason')}"
+    with sched.lock:
+        probing = [p["machine"] + " (" + p["state"] + ")" for (jid, _m), p in sched.probes.items() if jid == job.id]
+    if probing:
+        s += "\ntest frame: " + ", ".join(probing)
     if now:
         s += "   — rendering now: " + ", ".join(sorted(now))
     return s

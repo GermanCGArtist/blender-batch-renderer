@@ -31,6 +31,7 @@ DISK_FULL_HINTS = ("No space left", "Errno 28", "disk full", "ENOSPC")
 SCRIPTS = Path(__file__).resolve().parent / "blender_scripts"
 RENDER_SCRIPT = str(SCRIPTS / "bbr_render.py")
 PACKAGE_SCRIPT = str(SCRIPTS / "bbr_package.py")
+COMPARE_SCRIPT = str(SCRIPTS / "bbr_compare.py")
 PREFLIGHT_SCRIPT = str(SCRIPTS / "bbr_preflight.py")
 PREVIEW_SCRIPT = str(SCRIPTS / "bbr_preview.py")
 
@@ -94,6 +95,7 @@ class Runner:
         self.scheduler = Scheduler(queue, settings, self.emit)
         self.scheduler.request_package = self.request_package
         self.scheduler.on_job_complete = self._complete_job_async
+        self.scheduler.on_probe_uploaded = self._compare_probe
         self._packaging = {}          # job id -> thread
         self._finalize_lock = threading.Lock()
 
@@ -157,8 +159,7 @@ class Runner:
         if self.settings.share_with_workers and self.scheduler.remote_available():
             for j in self.queue.ordered_jobs():      # get the copies for the workers ready early
                 if j.status in RUNNABLE and self.queue.is_active(j):
-                    pkg = j.package or {}
-                    if not pkg.get("hash") or pkg.get("blend_stamp") != j.current_blend_stamp():
+                    if not self.scheduler.package_ok(j):
                         self.request_package(j)
                         break                        # one at a time; the next ones follow on demand
         self._thread = threading.Thread(target=self._run_batch, name="bbr-runner", daemon=True)
@@ -744,15 +745,58 @@ class Runner:
             self._msg("error", f"{job.name}: could not prepare it for other machines – {e}", job)
             return
         job.package = manifest
+        self.scheduler.invalidate_package(job)
         if job.scene_info is None and manifest.get("scene_info"):
             job.scene_info = manifest["scene_info"]
         self._job_changed(job)
         warn = manifest.get("warnings") or []
         need = manifest.get("addons_required") or []
-        self._msg("info", f"{job.name}: ready for other machines ({fmt_bytes(manifest.get('size'))}"
-                          + (f", needs add-ons: {', '.join(need)}" if need else "") + ")", job)
+        per = manifest.get("stream_bytes_per_frame") or 0
+        self._msg("info", f"{job.name}: ready for other machines – {manifest.get('files')} files, "
+                          f"{fmt_bytes(manifest.get('size_upfront'))} before the first frame"
+                          + (f", about {fmt_bytes(per)} per frame streamed" if per else "")
+                          + (f", needs add-ons: {', '.join(need)}" if need else ""), job)
+        if manifest.get("unbaked"):
+            self._msg("warn", f"{job.name}: not shared with other computers – unbaked simulation: "
+                              + "; ".join(manifest["unbaked"][:5]), job)
         for w in warn[:20]:
             self._msg("warn", f"{job.name}: {w}", job)
+
+    # ---- consistency check ------------------------------------------------------
+    def _compare_probe(self, job: Job, mid: str, probe_path: str, ref_path: str):
+        threading.Thread(target=self._compare_probe_now, args=(job, mid, probe_path, ref_path),
+                         name="bbr-compare", daemon=True).start()
+
+    def _compare_probe_now(self, job: Job, mid: str, probe_path: str, ref_path: str):
+        res = {"ok": None, "reason": "no Blender install for the comparison"}
+        inst, _ = self.resolve_install(job)
+        if inst is not None:
+            args = {"a": ref_path, "b": probe_path}
+            ap = job.tmp_dir / f"compare_{mid}.json"
+            atomic_write_json(ap, args)
+            out = {}
+
+            def on_line(line):
+                mk = parse_marker(line)
+                if mk and mk[0] == "COMPARE":
+                    out.update(mk[1])
+            cmd = [inst.executable, "-b", "--factory-startup", "--python-exit-code", "2",
+                   "--python", COMPARE_SCRIPT, "--", str(ap)]
+            try:
+                BlenderProcess(cmd, env_for(job), str(job.logs_dir / "compare.log"), on_line).run()
+                res = out or {"ok": None, "reason": "Blender did not report a result"}
+            except OSError as e:
+                res = {"ok": None, "reason": str(e)}
+        res["image"] = probe_path
+        if res.get("ok") is None:
+            self._msg("warn", f"{job.name}: could not compare the test frame ({res.get('reason')}) – "
+                              "letting the computer join anyway", job)
+            res["ok"] = True
+        try:
+            atomic_write_json(Path(probe_path).with_suffix(".json"), res)
+        except OSError:
+            pass
+        self.scheduler.probe_result(job, mid, bool(res["ok"]), res)
 
     # ---- preview ----------------------------------------------------------
     def make_preview(self, job: Job, inst: Optional[BlenderInstall] = None, blocking: bool = False):

@@ -57,6 +57,8 @@ class JobSettings:
     machines: List[str] = field(default_factory=list)   # machines allowed to render it ([] = all)
     ignore_addons: bool = False           # workers may render it without the add-ons it seems to use
     devices: dict = field(default_factory=dict)  # machine name -> "gpu" / "cpu" / "off" (missing = as in the file)
+    transfer: str = "smart"               # "smart": files once, frame files streamed / "full": everything up front
+    consistency_check: bool = True        # a new computer first renders a frame that is compared with this one
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobSettings":
@@ -92,7 +94,8 @@ class AppSettings:
     worker_server: str = ""               # worker: coordinator address, e.g. http://192.168.1.20:8642
     worker_key: str = ""                  # worker: key received when pairing
     worker_accepting: bool = True         # worker: take frames from the coordinator
-    worker_cache_gb: float = 50.0         # worker: keep job packages up to this size
+    worker_cache_gb: float = 50.0
+    worker_cache_dir: str = ""            # worker: where downloaded job files live ("" = app data folder)         # worker: keep job packages up to this size
     worker_stats: dict = field(default_factory=dict)      # worker: lifetime statistics
     settings_version: int = 1
 
@@ -178,7 +181,8 @@ class Job:
     group: str = ""                           # queue folder id ("" = top level)
     enabled: bool = True                      # unchecked jobs are skipped by the batch
     blend_stamp: Optional[List[float]] = None # [mtime, size] of the .blend when frames were rendered
-    package: Optional[dict] = None            # self-contained copy for other machines (manifest)
+    package: Optional[dict] = None            # job copy for other machines (summary, see package.py)
+    approvals: Dict[str, dict] = field(default_factory=dict)  # machine name -> consistency check result
 
     # ---- folders -------------------------------------------------------
     @property

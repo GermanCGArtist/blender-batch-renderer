@@ -116,6 +116,20 @@ class JobSettingsForm(QWidget):
                                       "Only for add-ons that don't change the image – otherwise frames from "
                                       "other computers look different.")
         form.addRow("", self.ignore_addons)
+        self.transfer = QComboBox()
+        self.transfer.addItem("Smart – files once, frame files when needed", "smart")
+        self.transfer.addItem("Full copy – everything before the first frame", "full")
+        self.transfer.setToolTip("How other computers get this job's files. Smart sends textures, caches and "
+                                 "libraries once (and reuses them for other jobs), and image/VDB sequences frame by "
+                                 "frame. Full copy sends every file before the first frame – slower to start, "
+                                 "but nothing can be missing later. Smart falls back to Full copy by itself when "
+                                 "a file turns out to be missing.")
+        form.addRow("Transfer to other computers", self.transfer)
+        self.consistency = QCheckBox("Check that other computers' frames look the same (test frame first)")
+        self.consistency.setToolTip("Before a computer joins this job it renders a frame that is already done "
+                                    "and the two images are compared. Computers whose frame looks different "
+                                    "(missing add-on effect, other colours, missing textures) are left out.")
+        form.addRow("", self.consistency)
         if machines_provider is not None:
             self.devices_box = QWidget()
             self.devices_lay = QFormLayout(self.devices_box)
@@ -191,6 +205,8 @@ class JobSettingsForm(QWidget):
         self.preflight.setChecked(bool(s.preflight))
         self.restart_every.setValue(int(s.restart_every or 0))
         self.ignore_addons.setChecked(bool(getattr(s, "ignore_addons", False)))
+        self.transfer.setCurrentIndex(1 if getattr(s, "transfer", "smart") == "full" else 0)
+        self.consistency.setChecked(bool(getattr(s, "consistency_check", True)))
         self._devices = dict(getattr(s, "devices", None) or {})
         for name, cb in self._device_boxes.items():
             cb.setCurrentIndex(max(0, cb.findData(self._devices.get(name, ""))))
@@ -205,7 +221,9 @@ class JobSettingsForm(QWidget):
             frame_timeout_min=self.timeout.value(), make_preview=self.preview.isChecked(),
             preflight=self.preflight.isChecked(), restart_every=self.restart_every.value(),
             ignore_addons=self.ignore_addons.isChecked(),
-            devices=self._collect_devices())
+            devices=self._collect_devices(),
+            transfer=self.transfer.currentData() or "smart",
+            consistency_check=self.consistency.isChecked())
 
     def _collect_devices(self) -> dict:
         d = dict(self._devices)

@@ -18,6 +18,9 @@ Behaviour switches (environment variables):
   FAKE_LIBTREE={"main": ["//libs/a.blend"], "/abs/a.blend": ["//b.blend"]}   linked libraries
   FAKE_IMAGES=/abs/tex.png;//rel.png   external images of the main file
   FAKE_VERSION=4.2.3      version string
+  FAKE_IMAGES entries starting with "seq:" are image sequences (e.g. seq:/abs/passes/pass_0001.exr)
+  FAKE_SEQ_USER=1,0,0,0   start,offset,duration,cyclic of the node using the image sequence
+  FAKE_PNG_COLOR=0,255,0  colour of rendered frames (consistency check tests)
 """
 import os
 import struct
@@ -38,7 +41,8 @@ if env.get("FAKE_LOAD_FAIL"):
 
 
 def tiny_png(path):
-    raw = b"\x00\xff\x00\x00"
+    col = bytes(int(x) for x in env.get("FAKE_PNG_COLOR", "0,255,0").split(","))
+    raw = b"\x00" + col
     def chunk(t, d):
         c = struct.pack(">I", len(d)) + t + d
         return c + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
@@ -81,7 +85,7 @@ class Scene(types.SimpleNamespace):
         return self._se
 
 
-scene = Scene(name="Scene", render=render, cycles=NS(samples=128, device="CPU"),
+scene = Scene(sequence_editor=None, name="Scene", render=render, cycles=NS(samples=128, device="CPU"),
               eevee=NS(taa_render_samples=64), frame_start=fs, frame_end=fe, frame_step=1,
               frame_current=fs, camera=None if env.get("FAKE_NO_CAMERA") else NS(name="Camera"),
               timeline_markers=[], view_layers=[NS(name="ViewLayer", use=True)],
@@ -100,6 +104,11 @@ def op_render(write_still=False, animation=False):
             f.write(b"fake mp4")
         return {"FINISHED"}
     f = scene.frame_current
+    for img in bpy.data.images:
+        if getattr(img, "source", "") == "SEQUENCE" and not img.packed_file:
+            p = seq_file_for(img, f)
+            if p and not os.path.exists(p):
+                print('Error: Cannot read image file "%s": No such file or directory' % p, flush=True)
     total = scene.cycles.samples
     ft = float(env.get("FAKE_FRAME_TIME", "0.2"))
     steps = 4
@@ -153,8 +162,23 @@ def abspath(p, library=None):
     return p
 
 
-def make_image(path):
-    img = NS(name=os.path.basename(path), filepath=path, library=None, packed_file=None, source="FILE")
+def seq_file_for(img, f):
+    u = [int(x) for x in env.get("FAKE_SEQ_USER", "1,0,0,0").split(",")]
+    n = f - u[0] + 1 + u[1]
+    path = abspath(img.filepath)
+    d, base = os.path.split(path)
+    import re as _re
+    m = list(_re.finditer(r"\d+", base))
+    if not m:
+        return None
+    m = m[-1]
+    return os.path.join(d, base[:m.start()] + str(n).zfill(len(m.group())) + base[m.end():])
+
+
+def make_image(path, source=None):
+    if path.startswith("seq:"):
+        path, source = path[4:], "SEQUENCE"
+    img = NS(name=os.path.basename(path), filepath=path, library=None, packed_file=None, source=source or "FILE")
     img.pack = lambda: setattr(img, "packed_file", True)
     return img
 
@@ -163,19 +187,41 @@ libtree = json.loads(env.get("FAKE_LIBTREE") or "{}")
 
 
 def load_data(path, is_main):
-    key = "main" if is_main else os.path.normpath(path)
-    libs = [NS(filepath=p, parent=None) for p in libtree.get(key, [])]
-    imgs = Images(make_image(p) for p in (env.get("FAKE_IMAGES", "").split(";") if is_main else []) if p)
+    saved = None
+    try:
+        with open(path) as fh:
+            saved = json.load(fh) if path else None
+    except (OSError, ValueError, UnicodeDecodeError):
+        saved = None
+    if saved and saved.get("fake_blend"):          # a copy written by save_as_mainfile below
+        libs = [NS(filepath=p, parent=None) for p in saved["libraries"]]
+        imgs = Images()
+        for fp, packed, src in saved["images"]:
+            im = make_image(fp, src)
+            im.packed_file = packed or None
+            imgs.append(im)
+    else:
+        key = "main" if is_main else os.path.normpath(path)
+        libs = [NS(filepath=p, parent=None) for p in libtree.get(key, [])]
+        imgs = Images(make_image(p) for p in (env.get("FAKE_IMAGES", "").split(";") if is_main else []) if p)
+    mats = []
+    for im in imgs:
+        if im.source == "SEQUENCE":
+            u = [int(x) for x in env.get("FAKE_SEQ_USER", "1,0,0,0").split(",")]
+            iu = NS(frame_start=u[0], frame_offset=u[1], frame_duration=u[2], use_cyclic=bool(u[3]))
+            mats.append(NS(node_tree=NS(nodes=[NS(image=im, image_user=iu, bl_idname="ShaderNodeTexImage")])))
     groups = [NS(name=n, nodes=[]) for n in env.get("FAKE_NODE_GROUPS", "").split(",") if n and is_main]
     bpy.data = NS(images=imgs, libraries=libs, sounds=[], movieclips=[], fonts=[], volumes=[], cache_files=[],
-                  node_groups=groups, materials=[], worlds=[], scenes=[scene], objects=[], cameras=[], lights=[],
-                  meshes=[])
+                  node_groups=groups, materials=mats, worlds=[], scenes=[scene], objects=[], cameras=[], lights=[],
+                  meshes=[], textures=[], filepath=current["file"])
+    bpy.data.images.load = load_png
 
 
 def save_as_mainfile(filepath, copy=False, relative_remap=True, compress=False):
     with open(filepath, "w") as f:
-        json.dump({"from": current["file"], "libraries": [l.filepath for l in bpy.data.libraries],
-                   "images": [[i.filepath, bool(i.packed_file)] for i in bpy.data.images]}, f)
+        json.dump({"fake_blend": True, "from": current["file"],
+                   "libraries": [l.filepath for l in bpy.data.libraries],
+                   "images": [[i.filepath, bool(i.packed_file), i.source] for i in bpy.data.images]}, f)
     return {"FINISHED"}
 
 
@@ -185,6 +231,22 @@ def open_mainfile(filepath, load_ui=False):
     current["file"] = os.path.abspath(filepath)
     load_data(filepath, False)
     return {"FINISHED"}
+
+
+def load_png(path, check_existing=False):
+    """Reads the 1x1 PNGs this stand-in writes (for the consistency check)."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    i = data.index(b"IDAT")
+    n = struct.unpack(">I", data[i - 4:i])[0]
+    raw = zlib.decompress(data[i + 4:i + 4 + n])
+    px = [raw[1] / 255.0, raw[2] / 255.0, raw[3] / 255.0, 1.0]
+
+    class Pixels(list):
+        def foreach_get(self, arr):
+            for k, v in enumerate(self):
+                arr[k] = v
+    return NS(size=(1, 1), channels=4, pixels=Pixels(px))
 
 
 addon_mods = []

@@ -334,3 +334,50 @@ def used_addons(addons):
             if t in nn:
                 used.setdefault(m, "the file contains its %s '%s'" % (kind, n))
     return used
+
+
+# ---- input check (worker) ------------------------------------------------------
+def missing_inputs(ignore=()):
+    """External files the open scene refers to that are not there (sequence folders count, single
+    frames of sequences are checked per frame by the app)."""
+    ignore = set(ignore)
+    out = []
+
+    def ab(path, lib):
+        try:
+            return os.path.normpath(bpy.path.abspath(path, library=lib))
+        except TypeError:
+            return os.path.normpath(bpy.path.abspath(path))
+
+    def check(path, lib, kind):
+        if not path or path.startswith("<"):
+            return
+        p = ab(path, lib)
+        if os.path.basename(p) in ignore:
+            return
+        if kind == "dir":
+            if not os.path.isdir(os.path.dirname(p)):
+                out.append(p)
+        elif kind == "udim":
+            d, base = os.path.split(p)
+            pat = re.compile("^" + re.escape(base).replace(re.escape("<UDIM>"), r"\d{4}") + "$")
+            if not (os.path.isdir(d) and any(pat.match(f) for f in os.listdir(d))):
+                out.append(p)
+        elif not os.path.exists(p):
+            out.append(p)
+
+    for lib in bpy.data.libraries:
+        check(lib.filepath, getattr(lib, "parent", None), "file")
+    for img in bpy.data.images:
+        if img.packed_file or not img.filepath or img.source not in ("FILE", "TILED", "SEQUENCE", "MOVIE"):
+            continue
+        kind = "udim" if (img.source == "TILED" or "<UDIM>" in img.filepath) else \
+            ("dir" if img.source == "SEQUENCE" else "file")
+        check(img.filepath, img.library, kind)
+    for coll in (bpy.data.sounds, bpy.data.fonts, bpy.data.movieclips, bpy.data.cache_files, bpy.data.volumes):
+        for d in coll:
+            if getattr(d, "packed_file", None):
+                continue
+            seq = getattr(d, "is_sequence", False) or getattr(d, "source", "") == "SEQUENCE"
+            check(getattr(d, "filepath", ""), d.library, "dir" if seq else "file")
+    return sorted(set(out))

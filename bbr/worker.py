@@ -25,12 +25,11 @@ import shutil
 import socket
 import threading
 import time
-import zipfile
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlparse, quote
 
-from . import __version__
+from . import __version__, PROTOCOL
 from .installs import BlenderInstall
 from .parse import parse_marker, parse_stats, fmt_bytes
 from .process import BlenderProcess
@@ -90,7 +89,8 @@ def pair(server: str, code: str, machine_id: str, name: str) -> dict:
     """Ask the coordinator for its worker key. Returns {"key", "coordinator"}; raises CoordinatorError."""
     server = normalize_server(server)
     try:
-        st, d = _request(server, "POST", "/api/v1/worker/pair", {"code": code, "id": machine_id, "name": name})
+        st, d = _request(server, "POST", "/api/v1/worker/pair", {"code": code, "id": machine_id, "name": name},
+                         {"X-BBR-Protocol": str(PROTOCOL)})
     except OSError as e:
         raise CoordinatorError(0, f"cannot reach {server} ({e})")
     if st != 200:
@@ -136,8 +136,7 @@ class Worker:
     def __init__(self, settings, emit: Callable[[str, dict], None] = lambda k, p: None):
         self.settings = settings
         self._emit_ext = emit
-        self.cache_dir = app_data_dir() / "worker_cache"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._cache_override = None    # tests
         self.running = False
         self.accepting = bool(getattr(settings, "worker_accepting", True))
         self.state = "stopped"          # stopped / not paired / offline / paused / idle / downloading /
@@ -161,11 +160,25 @@ class Worker:
         self._active_upload = None
         self._threads = []
         self._addon_cache = {}          # executable -> (mtime, result)
+        self._full_jobs = set()         # (job id, version) that switched to Full copy
+        self._progress = None
         from .keepawake import KeepAwake
         self._keep = KeepAwake()
         self._lock = threading.RLock()
 
     # ---- public ------------------------------------------------------------------
+    @property
+    def cache_dir(self) -> Path:
+        d = self._cache_override or (Path(self.settings.worker_cache_dir).expanduser()
+                                     if getattr(self.settings, "worker_cache_dir", "") else
+                                     app_data_dir() / "worker_cache")
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @cache_dir.setter
+    def cache_dir(self, value):
+        self._cache_override = Path(value)
+
     @property
     def paired(self) -> bool:
         return bool(self.settings.worker_server and self.settings.worker_key)
@@ -295,7 +308,8 @@ class Worker:
         self.emit("message", {"level": level, "text": text, "job_id": None})
 
     def _headers(self) -> dict:
-        return {"X-BBR-Worker-Key": self.settings.worker_key, "X-BBR-Machine": self.settings.worker_id}
+        return {"X-BBR-Worker-Key": self.settings.worker_key, "X-BBR-Machine": self.settings.worker_id,
+                "X-BBR-Protocol": str(PROTOCOL)}
 
     def _post(self, path: str, body: dict, timeout: float = 20.0) -> dict:
         st, d = _request(self.settings.worker_server, "POST", path, body, self._headers(), timeout)
@@ -323,6 +337,9 @@ class Worker:
         info.update({"name": self.name,
                      "installs": [{k: i[k] for k in ("version", "label", "addons")} for i in self.installs_info]})
         d = self._post("/api/v1/worker/hello", info)
+        if d.get("protocol") != PROTOCOL:
+            raise CoordinatorError(426, f"version mismatch: the coordinator runs version {d.get('app_version')}, "
+                                        f"this computer {__version__} – update both to the same version")
         self.coordinator_name = d.get("coordinator") or ""
         self.registered = True
         self._console(f"Connected to {self.coordinator_name} ({self.settings.worker_server})")
@@ -349,13 +366,17 @@ class Worker:
                 lease = r.get("lease")
                 if not lease:
                     self._set_state("idle", r.get("reason") or "waiting for work")
-                    self._sleep(3)
+                    self._sleep(2)
                     continue
                 self._work(lease)
             except CoordinatorError as e:
                 if e.status == 401:
                     self._set_state("not paired", e.message)
                     self._sleep(5)
+                elif e.status == 426:
+                    self.registered = False
+                    self._set_state("error", e.message)
+                    self._sleep(30)
                 else:
                     self._set_state("error", e.message)
                     self._sleep(5)
@@ -420,13 +441,22 @@ class Worker:
                 return i
         return None
 
+    def _note(self, job_id: str, level: str, text: str):
+        self._msg(level, text)
+        try:
+            self._post("/api/v1/worker/note", {"job_id": job_id, "level": level, "text": text}, timeout=5)
+        except Exception:
+            pass
+
     def _work(self, lease: dict):
-        job_id = lease["job_id"]
+        job_id, version = lease["job_id"], lease["package"]
         self.current = dict(lease)
         self._abort_current = ""
         if self._abort_gen is None:
             self._abort_gen = lease.get("abort_gen")
         held = {lease["frame"]}           # frames we hold a lease on that are not finished yet
+        mode = "full" if lease.get("transfer") == "full" or (job_id, version) in self._full_jobs else "smart"
+        self.current["transfer"] = mode
         if getattr(self.settings, "keep_awake", True):
             self._keep.start()
         try:
@@ -435,18 +465,33 @@ class Worker:
                 self._post("/api/v1/worker/job-error", {"job_id": job_id,
                                                          "reason": f"Blender {lease.get('blender')} not installed"})
                 return
-            try:
-                pdir = self._ensure_package(lease)
-            except CoordinatorError as e:
-                if e.status == 410:
-                    return            # outdated package: the lease is dropped, ask again
-                raise
-            except _PackageBroken as e:
-                self._post("/api/v1/worker/job-error", {"job_id": job_id, "reason": str(e)})
+            first = [lease["frame"]]
+            while True:
+                try:
+                    ws, man = self._prepare(lease, mode)
+                except CoordinatorError as e:
+                    if e.status in (404, 410):
+                        self._console(f"The job copy changed on the coordinator ({e.message}) – starting over")
+                        return
+                    raise
+                except _PackageBroken as e:
+                    self._post("/api/v1/worker/job-error", {"job_id": job_id, "reason": str(e)})
+                    return
+                if self._abort_current:
+                    return
+                result = self._render(lease, inst, ws, man, mode, held, first)
+                if result and result[0] == "fallback" and mode == "smart":
+                    mode = "full"
+                    self.current["transfer"] = mode
+                    self._full_jobs.add((job_id, version))
+                    self._note(job_id, "warn", f"{result[1]} – switching to Full copy for this job")
+                    first = sorted(f for f in held if f not in self._pending_frames(job_id))
+                    if not first:
+                        return
+                    continue
+                if result and result[0] == "missing":
+                    self._post("/api/v1/worker/job-error", {"job_id": job_id, "reason": result[1][:300]})
                 return
-            if self._abort_current:
-                return
-            self._render(lease, inst, pdir, held)
         finally:
             leftover = sorted(f for f in held if f not in self._pending_frames(job_id))
             if leftover:
@@ -459,33 +504,82 @@ class Worker:
             self.live = {}
             self.emit("worker", {})
 
-    def _render(self, lease: dict, inst: BlenderInstall, pdir: Path, held: set):
+    def _render(self, lease, inst, ws: Path, man: dict, mode: str, held: set, first: list):
+        """Run Blender until the job is done here. Returns None, ('fallback', why) or ('missing', why)."""
         job_id = lease["job_id"]
         work = self.cache_dir / "work" / job_id
         shutil.rmtree(work, ignore_errors=True)
         (work / "frames").mkdir(parents=True, exist_ok=True)
         (work / "tmp").mkdir(parents=True, exist_ok=True)
-        first = [lease["frame"]]
+        first = list(first)
         load_fails = crashes = 0
         timeout_s = float(lease.get("frame_timeout_min") or 0) * 60
+        frames_map = man.get("frames") or {}
+        streaming = mode == "smart" and bool(frames_map)
         n = 0
+
+        def frame_files(f):
+            return [(p, man["files"][p]) for p in frames_map.get(str(f), []) if p in man["files"]]
+
+        def fetch_frame(f):
+            t0 = time.time()
+            for p, e in frame_files(f):
+                self._ensure_file(lease, ws, p, e, store=e["kind"] != "frame", quiet=True)
+            return time.time() - t0
+
+        def drop_frame_files(f, keep_for=()):
+            keep = set()
+            for g in keep_for:
+                keep |= {p for p, _ in frame_files(g)}
+            for p, e in frame_files(f):
+                if e["kind"] == "frame" and p not in keep:
+                    try:
+                        (ws / p).unlink()
+                    except OSError:
+                        pass
+
         while not self._stop.is_set():
             n += 1
             args = {"frames_dir": str(work / "frames"), "prefix": lease.get("prefix", ""), "skip": [],
                     "dynamic": True, "max_frames": int(lease.get("restart_every") or 0),
-                    "overrides": lease.get("overrides") or {}}
+                    "overrides": lease.get("overrides") or {},
+                    "check_inputs": {"ignore": man.get("missing") or [],
+                                     "streamed": streaming}}
             args_path = work / f"args_{n:03d}.json"
             atomic_write_json(args_path, args)
-            cmd = [inst.executable, "-b", str(pdir / "main.blend"), "--python-exit-code", "2",
+            cmd = [inst.executable, "-b", str(ws / "main.blend"), "--python-exit-code", "2",
                    "--python", RENDER_SCRIPT, "--", str(args_path)]
             env = dict(os.environ)
             env.update({"TMPDIR": str(work / "tmp"), "TEMP": str(work / "tmp"), "TMP": str(work / "tmp"),
                         "PYTHONUNBUFFERED": "1"})
-            st = {"all_done": False, "chunk": False, "error": "", "fatal": "", "frame": None, "rendered": 0}
+            st = {"all_done": False, "chunk": False, "error": "", "fatal": "", "frame": None, "rendered": 0,
+                  "missing": None, "input_error": "", "fetch_s": {}}
+            ahead = {"frame": None, "thread": None}
             self._set_state("loading", f"{lease.get('job')}: opening the file")
             self.live = {"frame": None, "since": time.time()}
-            proc = BlenderProcess(cmd, env, str(work / f"blender_{n:03d}.log"), lambda l: None, cwd=str(pdir))
+            proc = BlenderProcess(cmd, env, str(work / f"blender_{n:03d}.log"), lambda l: None, cwd=str(ws))
             proc.interactive = True
+
+            def stopping():
+                return bool(self._stop_after_frame or self._abort_current or not self.accepting)
+
+            def prefetch():
+                def run():
+                    try:
+                        g = self._post("/api/v1/worker/next", {"job_id": job_id}, timeout=10).get("frame")
+                    except Exception:
+                        return
+                    if g is None:
+                        return
+                    held.add(int(g))
+                    ahead["frame"] = int(g)
+                    try:
+                        st["fetch_s"][int(g)] = fetch_frame(int(g))
+                    except Exception as ex:
+                        ahead["error"] = ex
+                t = threading.Thread(target=run, name="bbr-prefetch", daemon=True)
+                ahead["thread"] = t
+                t.start()
 
             def on_line(line, proc=proc, st=st):
                 self._console(line)
@@ -493,27 +587,61 @@ class Worker:
                 if not mk:
                     if line.startswith("Error") or "Traceback" in line:
                         st["error"] = (st["error"] + "\n" + line).strip()[-2000:]
+                    if streaming and st["frame"] is not None and INPUT_ERROR.search(line) and \
+                            (str(ws) in line or any(os.path.basename(p) in line for p, _ in frame_files(st["frame"]))):
+                        st["input_error"] = line.strip()[:300]
                     return
                 kind, data = mk
                 if kind == "NEED_FRAME":
                     f = None
                     if first:
-                        f = first.pop()
-                    elif not (self._stop_after_frame or self._abort_current or not self.accepting):
+                        f = first.pop(0)
+                    else:
+                        t = ahead.get("thread")
+                        if t is not None:
+                            t.join()
+                            ahead["thread"] = None
+                        if ahead.get("frame") is not None:
+                            f, ahead["frame"] = ahead["frame"], None
+                            if ahead.pop("error", None) is not None:
+                                st["fetch_s"].pop(f, None)       # fetch again below
+                        elif not stopping():
+                            try:
+                                f = self._post("/api/v1/worker/next", {"job_id": job_id}, timeout=10).get("frame")
+                            except Exception:
+                                f = None
+                    if f is not None and stopping() and not first:
                         try:
-                            f = self._post("/api/v1/worker/next", {"job_id": job_id}, timeout=10).get("frame")
+                            self._post("/api/v1/worker/release", {"job_id": job_id, "frames": [f]}, timeout=5)
                         except Exception:
-                            f = None
+                            pass
+                        held.discard(f)
+                        f = None
                     if f is not None:
-                        held.add(int(f))
+                        f = int(f)
+                        held.add(f)
+                        if streaming and f not in st["fetch_s"]:
+                            self._set_state("downloading", f"{lease.get('job')}: files for frame {f}")
+                            try:
+                                st["fetch_s"][f] = fetch_frame(f)
+                            except (CoordinatorError, _PackageBroken, OSError) as ex:
+                                self._console(f"Could not get the files for frame {f}: {ex}")
+                                st["input_error"] = f"files for frame {f} could not be fetched ({ex})"
+                                f = None
                     proc.send(f"FRAME {f}" if f is not None else "DONE")
+                elif kind == "INPUT_MISSING":
+                    st["missing"] = data.get("files") or []
                 elif kind == "JOB_INFO":
                     self.live["device"] = data.get("device")
                 elif kind == "FRAME_START":
                     st["frame"] = int(data["frame"])
+                    st["input_error"] = ""
                     self.live = {"frame": st["frame"], "since": time.time(), "device": self.live.get("device")}
                     proc.reset_peak()
-                    self._set_state("rendering", f"{lease.get('job')}: frame {st['frame']}")
+                    self._set_state("rendering", f"{lease.get('job')}: frame {st['frame']}"
+                                    + ("  (test frame for the consistency check)" if lease.get("probe") else ""))
+                    if streaming and not first and not stopping() and not lease.get("probe"):
+                        prefetch()
                 elif kind == "STATS":
                     s = parse_stats(str(data.get("s", "")))
                     for k in ("sample", "samples", "remaining_s", "elapsed_s"):
@@ -524,12 +652,20 @@ class Worker:
                 elif kind == "FRAME_DONE":
                     f = int(data["frame"])
                     st["frame"] = None
+                    if st["input_error"]:
+                        # a file was missing or unreadable while rendering this frame: do not deliver it
+                        st["fallback"] = f"frame {f}: {st['input_error']}"
+                        proc.kill("fallback")
+                        return
                     st["rendered"] += 1
                     meta = {k: data.get(k) for k in ("render_s", "save_s", "peak_mb", "samples", "stats")}
                     meta["process_peak_mb"] = proc.rss_peak_mb
+                    meta["fetch_s"] = round(st["fetch_s"].pop(f, 0.0), 2)
                     self._uploads.put({"job_id": job_id, "job": lease.get("job"), "frame": f,
                                        "file": data["file"], "extra": data.get("extra") or [],
                                        "frames_dir": str(work / "frames"), "meta": meta, "held": held})
+                    if streaming:
+                        drop_frame_files(f, keep_for=[g for g in (ahead.get("frame"),) if g is not None] + first)
                     self.live = {"frame": None, "since": time.time(), "device": self.live.get("device")}
                     self._set_state("loading", f"{lease.get('job')}: next frame")
                 elif kind == "FRAME_ERROR":
@@ -551,21 +687,35 @@ class Worker:
             self._proc = proc
             if self._abort_current:
                 self._proc = None
-                return
+                return None
             try:
                 rc = proc.run()
             except OSError as e:
                 rc, st["error"] = -999, f"could not start Blender: {e}"
             finally:
                 self._proc = None
+                t = ahead.get("thread")
+                if t is not None:
+                    t.join(30)
+                if ahead.get("frame") is not None and ahead["frame"] not in first:
+                    first.insert(0, ahead["frame"])        # leased and fetched: render it next time
             if self._abort_current or proc.kill_reason == "quit":
                 self._console(f"Stopped: {self._abort_current or 'quit'}")
-                return                                   # leases are released by _work
+                return None
+            if st["missing"] is not None:
+                why = "files missing here: " + ", ".join(os.path.basename(x) for x in st["missing"][:5])
+                self._keep_crash_log(work, n)
+                return ("fallback", why) if mode == "smart" else ("missing", why)
+            if st.get("fallback"):
+                self._keep_crash_log(work, n)
+                return ("fallback", st["fallback"]) if mode == "smart" else ("missing", st["fallback"])
+            if st["input_error"] and mode == "smart" and st["frame"] is None and not st["rendered"]:
+                return ("fallback", st["input_error"])
             if st["fatal"]:
                 self._post("/api/v1/worker/job-error", {"job_id": job_id, "reason": st["fatal"][:300]})
-                return
+                return None
             if rc == 0 and st["all_done"]:
-                return
+                return None
             if rc == 0 and st["chunk"]:
                 continue                                 # planned restart of Blender
             why = "frame timeout" if proc.kill_reason == "timeout" else f"Blender exited with code {rc}"
@@ -582,20 +732,22 @@ class Worker:
                 except Exception:
                     pass
                 self._msg("warn", f"{lease.get('job')}: frame {f} failed here ({why})")
+                if lease.get("probe"):
+                    return None
                 if crashes >= CRASHES_BEFORE_GIVING_UP and st["rendered"] == 0:
                     self._post("/api/v1/worker/job-error", {"job_id": job_id,
                                                              "reason": f"crashed {crashes}x in a row ({why})"})
-                    return
+                    return None
             elif st["rendered"] == 0:
                 load_fails += 1
                 if load_fails >= LOAD_FAILS_BEFORE_GIVING_UP:
                     self._post("/api/v1/worker/job-error", {"job_id": job_id,
                                                              "reason": f"Blender could not open the job here ({why})"})
-                    return
+                    return None
             if st["rendered"]:
                 crashes = 0
-            # hand the frames that Blender got but never started back, then carry on
-            unstarted = [f for f in held if f not in self._pending_frames(job_id)]
+            # hand back the frames Blender got but never started (except one we prefetched)
+            unstarted = [f for f in held if f not in self._pending_frames(job_id) and f not in first]
             for f in unstarted:
                 held.discard(f)
             if unstarted:
@@ -603,9 +755,10 @@ class Worker:
                     self._post("/api/v1/worker/release", {"job_id": job_id, "frames": unstarted}, timeout=5)
                 except Exception:
                     pass
-            if not self.accepting or self._stop_after_frame:
-                return
+            if not self.accepting or self._stop_after_frame or lease.get("probe"):
+                return None
             time.sleep(1)
+        return None
 
     def _pending_frames(self, job_id: str) -> set:
         with self._uploads.mutex:
@@ -653,12 +806,14 @@ class Worker:
     def _put(self, path: str, file: str, extra_headers: dict) -> int:
         u = urlparse(self.settings.worker_server)
         size = os.path.getsize(file)
+        digest = _sha256(file)
         c = http.client.HTTPConnection(u.hostname, u.port or 8642, timeout=60)
         try:
             h = dict(self._headers())
             h.update(extra_headers)
             h["Content-Length"] = str(size)
             h["Content-Type"] = "application/octet-stream"
+            h["X-BBR-SHA256"] = digest
             c.putrequest("PUT", path)
             for k, v in h.items():
                 c.putheader(k, v)
@@ -680,6 +835,7 @@ class Worker:
         t0 = time.time()
         delay = 2.0
         files = [os.path.join(item["frames_dir"], rel) for rel in item["extra"]] + [item["file"]]
+        damaged = 0
         while not self._stop.is_set():
             try:
                 for rel in item["extra"]:
@@ -687,13 +843,17 @@ class Worker:
                     if not os.path.exists(p):
                         continue
                     st = self._put(f"/api/v1/worker/extra/{job_id}/{f}?path={quote(rel.replace(os.sep, '/'))}", p, {})
+                    if st == 422:
+                        raise _Damaged()
                     if st not in (200, 409):
                         raise CoordinatorError(st, f"upload failed (HTTP {st})")
-                meta = dict(item["meta"], upload_s=None)
+                meta = dict(item["meta"])
                 meta["upload_s"] = round(time.time() - t0, 2)
                 st = self._put(f"/api/v1/worker/frame/{job_id}/{f}?name={quote(os.path.basename(item['file']))}",
                                item["file"], {"X-BBR-Meta": json.dumps(meta)})
-                if st == 200:
+                if st == 202:
+                    self._console(f"Test frame {f} of {item['job']} delivered – the coordinator compares it")
+                elif st == 200:
                     size = os.path.getsize(item["file"])
                     self._bump("frames", 1, item["job"])
                     self._bump("render_s", float(item["meta"].get("render_s") or 0), item["job"])
@@ -707,14 +867,22 @@ class Worker:
                     self._console(f"Frame {f}: another machine already delivered it")
                 elif st in (404, 410):
                     self._console(f"Frame {f}: the job is gone from the coordinator – dropped")
+                elif st == 422:
+                    raise _Damaged()
                 elif st == 401:
                     self.registered = False
                     raise CoordinatorError(st, "not paired")
-                elif st == 413 or st == 507:
+                elif st in (413, 426, 507):
                     self._msg("error", f"Frame {f}: the coordinator refused it (HTTP {st})")
                 else:
                     raise CoordinatorError(st, f"upload failed (HTTP {st})")
                 break
+            except _Damaged:
+                damaged += 1
+                self._console(f"Frame {f}: arrived damaged at the coordinator, sending it again ({damaged})")
+                if damaged >= 5:
+                    self._msg("error", f"Frame {f}: could not be delivered undamaged – giving it back")
+                    break
             except (OSError, CoordinatorError) as e:
                 self._console(f"Frame {f}: upload failed ({e}), retrying in {int(delay)}s")
                 self._stop.wait(delay)
@@ -725,134 +893,267 @@ class Worker:
             except OSError:
                 pass
 
-    # ---- packages ------------------------------------------------------------------
-    def _ensure_package(self, lease: dict) -> Path:
-        digest = lease["package"]
-        final = self.cache_dir / digest
-        if (final / ".complete").exists():
-            (final / ".complete").touch()
-            return final
-        size = int(lease.get("package_size") or 0)
-        self._evict(keep=digest, need=size * 2.2)
-        free = shutil.disk_usage(self.cache_dir).free
-        if size and free < size * 2.2:
-            raise _PackageBroken(f"not enough disk space here for the job ({fmt_bytes(size * 2.2)} needed)")
-        part = self.cache_dir / f"{digest}.zip.part"
-        tries = 0
-        while True:
-            tries += 1
-            self._download(lease, part, size)
+    # ---- job copies: files by checksum ----------------------------------------------
+    def _store_path(self, digest: str) -> Path:
+        return self.cache_dir / "store" / digest[:2] / digest
+
+    def _prepare(self, lease: dict, mode: str):
+        """Make sure every file the job needs before rendering is here and correct."""
+        job_id, version = lease["job_id"], lease["package"]
+        jobs = self.cache_dir / "jobs" / job_id
+        ws = jobs / version
+        ws.mkdir(parents=True, exist_ok=True)
+        for old in jobs.iterdir():                     # older versions of this job
+            if old.name != version:
+                shutil.rmtree(old, ignore_errors=True)
+        man = read_json(ws / ".manifest.json")
+        if not man or man.get("version") != version:
+            self._set_state("downloading", f"{lease.get('job')}: list of files")
+            man = self._get_json(f"/api/v1/worker/manifest/{job_id}/{version}")
+            atomic_write_json(ws / ".manifest.json", man)
+        (ws / ".manifest.json").touch()
+        for d in {os.path.dirname(p) for p in man["files"]}:      # sequence folders exist from the start
+            if d:
+                (ws / d).mkdir(parents=True, exist_ok=True)
+        need = [(p, e) for p, e in man["files"].items() if e["kind"] != "frame" or mode == "full"]
+        todo = [(p, e) for p, e in need if not self._present(ws, p, e)]
+        total = sum(e["size"] for _p, e in todo)
+        if todo:
+            stored = sum(e["size"] for _p, e in todo if e.get("hash") and self._store_path(e["hash"]).exists())
+            self._evict(keep=ws, need=total - stored)
+            free = shutil.disk_usage(self.cache_dir).free
+            if free < (total - stored) + (1 << 30):
+                raise _PackageBroken(f"not enough disk space here ({fmt_bytes(total - stored)} needed, "
+                                     f"{fmt_bytes(free)} free)")
+        self._progress = {"done": 0, "total": total, "t0": time.time(), "job": lease.get("job")}
+        for p, e in todo:
+            if self._abort_current:
+                return ws, man
+            self._ensure_file(lease, ws, p, e, store=e["kind"] != "frame" or mode == "full")
+        self._progress = None
+        return ws, man
+
+    def _present(self, ws: Path, p: str, e: dict) -> bool:
+        try:
+            return (ws / p).stat().st_size == e["size"]
+        except OSError:
+            return False
+
+    def _link(self, src: Path, dst: Path):
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dst.unlink()
+        except OSError:
+            pass
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+
+    def _ensure_file(self, lease: dict, ws: Path, p: str, e: dict, store: bool, quiet: bool = False):
+        dst = ws / p
+        if self._present(ws, p, e):
+            return
+        h = e.get("hash")
+        if store and h:
+            sp = self._store_path(h)
+            try:
+                if sp.stat().st_size == e["size"]:
+                    os.utime(sp)
+                    self._link(sp, dst)
+                    return
+            except OSError:
+                pass
+        tmp, digest = self._download(lease, p, e, quiet)
+        if store:
+            sp = self._store_path(digest)
+            sp.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(tmp, sp)
+            self._link(sp, dst)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(tmp, dst)
+
+    def _get_json(self, path: str) -> dict:
+        u = urlparse(self.settings.worker_server)
+        c = http.client.HTTPConnection(u.hostname, u.port or 8642, timeout=60)
+        try:
+            c.request("GET", path, headers=self._headers())
+            r = c.getresponse()
+            raw = r.read()
+            try:
+                d = json.loads(raw.decode() or "{}")
+            except ValueError:
+                d = {}
+            if r.status != 200:
+                raise CoordinatorError(r.status, d.get("error") or f"HTTP {r.status}")
+            return d
+        finally:
+            c.close()
+
+    def _download(self, lease: dict, p: str, e: dict, quiet: bool = False):
+        """Fetch one file into the temp folder and check its checksum. Returns (path, sha256)."""
+        u = urlparse(self.settings.worker_server)
+        tmpdir = self.cache_dir / "tmp"
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        part = tmpdir / (hashlib.sha1(f"{lease['job_id']}/{p}".encode()).hexdigest()[:16] + ".part")
+        delay, damaged = 2.0, 0
+        try:
+            import zstandard  # noqa: F401
+            accept = "zstd"
+        except ImportError:
+            accept = ""
+        while not self._stop.is_set():
             if self._abort_current:
                 raise CoordinatorError(499, "stopped")
-            h = hashlib.sha256()
-            with open(part, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1 << 20), b""):
-                    h.update(chunk)
-            if h.hexdigest()[:len(digest)] == digest:
-                break
-            part.unlink()
-            if tries >= 2:
-                raise _PackageBroken("the downloaded job copy is damaged twice in a row")
-        self._set_state("downloading", f"{lease.get('job')}: unpacking")
-        tmp = self.cache_dir / f"{digest}.unpacking"
-        shutil.rmtree(tmp, ignore_errors=True)
-        with zipfile.ZipFile(part) as z:
-            for n in z.namelist():
-                if n.startswith("/") or ".." in n.split("/"):
-                    raise _PackageBroken("the job copy contains unsafe file names")
-            z.extractall(tmp)
-        shutil.rmtree(final, ignore_errors=True)
-        os.replace(tmp, final)
-        part.unlink()
-        (final / ".complete").write_text(json.dumps({"job": lease.get("job"), "at": time.time()}))
-        return final
-
-    def _download(self, lease: dict, part: Path, size: int):
-        u = urlparse(self.settings.worker_server)
-        delay = 2.0
-        while not self._abort_current and not self._stop.is_set():
             have = part.stat().st_size if part.exists() else 0
-            if size and have == size:
-                return
             c = http.client.HTTPConnection(u.hostname, u.port or 8642, timeout=60)
             try:
-                h = self._headers()
+                h = dict(self._headers())
+                h["X-BBR-Accept"] = accept
                 if have:
                     h["Range"] = f"bytes={have}-"
-                c.request("GET", f"/api/v1/worker/package/{lease['job_id']}/{lease['package']}", headers=h)
+                c.request("GET", f"/api/v1/worker/file/{lease['job_id']}/{lease['package']}?path={quote(p)}",
+                          headers=h)
                 r = c.getresponse()
-                if r.status == 410 or r.status == 404:
-                    r.read()
-                    raise CoordinatorError(410, "package outdated")
+                if r.status in (404, 410):
+                    msg = r.read()[:300].decode(errors="replace")
+                    raise CoordinatorError(410, msg)
                 if r.status not in (200, 206):
                     r.read()
                     raise CoordinatorError(r.status, f"download failed (HTTP {r.status})")
-                mode = "ab" if r.status == 206 else "wb"
-                got = have if r.status == 206 else 0
+                want = (r.getheader("X-BBR-SHA256") or "").lower()
+                enc = r.getheader("X-BBR-Encoding") or "identity"
                 t0, last = time.time(), 0.0
-                with open(part, mode) as fh:
-                    while True:
-                        if self._abort_current:
-                            return
-                        chunk = r.read(1 << 20)
-                        if not chunk:
-                            break
-                        fh.write(chunk)
-                        got += len(chunk)
-                        now = time.time()
-                        if now - last > 0.5:
-                            last = now
-                            rate = (got - have) / max(0.001, now - t0)
-                            self.live = {"download": got, "download_of": size, "rate": rate}
-                            self._set_state("downloading", f"{lease.get('job')}: {fmt_bytes(got)} of "
-                                                           f"{fmt_bytes(size)} ({fmt_bytes(rate)}/s)")
-                            self.emit("worker_live", {})
-                if not size or got >= size:
-                    return
-            except CoordinatorError:
+                if enc == "zstd":
+                    import zstandard
+                    data = zstandard.ZstdDecompressor().decompress(r.read(), max_output_size=e["size"] + 1)
+                    with open(part, "wb") as fh:
+                        fh.write(data)
+                else:
+                    with open(part, "ab" if r.status == 206 else "wb") as fh:
+                        got = have if r.status == 206 else 0
+                        while True:
+                            if self._abort_current:
+                                raise CoordinatorError(499, "stopped")
+                            chunk = r.read(1 << 20)
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            got += len(chunk)
+                            if self._progress is not None:
+                                self._progress["done"] += len(chunk)
+                            now = time.time()
+                            if now - last > 0.5 and not quiet:
+                                last = now
+                                self._show_progress(p)
+                digest = _sha256(str(part))
+                if digest == want and (not e.get("hash") or e["hash"] == digest):
+                    return part, digest
+                damaged += 1
+                part.unlink()
+                self._console(f"{os.path.basename(p)} arrived damaged – downloading it again ({damaged})")
+                if damaged >= 3:
+                    raise _PackageBroken(f"{os.path.basename(p)} arrived damaged three times")
+            except (CoordinatorError, _PackageBroken):
                 raise
-            except OSError as e:
-                self._set_state("downloading", f"connection lost ({e.__class__.__name__}), resuming …")
+            except OSError as ex:
+                self._set_state("downloading", f"connection lost ({ex.__class__.__name__}), resuming …")
                 self._stop.wait(delay)
                 delay = min(delay * 2, 30)
             finally:
                 c.close()
+        raise CoordinatorError(499, "stopped")
 
-    def _evict(self, keep: str, need: float = 0):
-        """Delete the least recently used job copies until the cache fits its size limit."""
+    def _show_progress(self, p: str):
+        pr = self._progress
+        if not pr:
+            return
+        rate = pr["done"] / max(0.001, time.time() - pr["t0"])
+        self.live = {"download": pr["done"], "download_of": pr["total"], "rate": rate}
+        self._set_state("downloading", f"{pr['job']}: {fmt_bytes(pr['done'])} of {fmt_bytes(pr['total'])} "
+                                       f"({fmt_bytes(rate)}/s)")
+        self.emit("worker_live", {})
+
+    def _evict(self, keep: Path, need: float = 0):
+        """Delete what was used longest ago until the cache fits its size limit."""
         limit = float(self.settings.worker_cache_gb or 50) * 1024 ** 3
-        entries = []
-        for d in self.cache_dir.iterdir():
-            if d.is_dir() and (d / ".complete").exists() and d.name != keep:
-                size = sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
-                entries.append(((d / ".complete").stat().st_mtime, size, d))
-        total = sum(e[1] for e in entries)
-        for _t, size, d in sorted(entries):
+        items = []                       # (last used, size, path, kind)
+        total = 0
+        jobs = self.cache_dir / "jobs"
+        for job_dir in (jobs.iterdir() if jobs.exists() else []):
+            for vdir in job_dir.iterdir() if job_dir.is_dir() else []:
+                size = sum(f.stat().st_size for f in vdir.rglob("*") if f.is_file() and f.stat().st_nlink == 1)
+                total += size
+                if vdir != keep:
+                    mf = vdir / ".manifest.json"
+                    items.append(((mf.stat().st_mtime if mf.exists() else 0), size, vdir, "job"))
+        store = self.cache_dir / "store"
+        for f in (store.rglob("*") if store.exists() else []):
+            if f.is_file():
+                st = f.stat()
+                total += st.st_size
+                items.append((st.st_mtime, st.st_size, f, "file"))
+        for _t, size, path, kind in sorted(items, key=lambda x: (x[3] != "job", x[0])):
             if total + need <= limit:
                 break
-            shutil.rmtree(d, ignore_errors=True)
+            if kind == "job":
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
             total -= size
-            self._console(f"Removed an old job copy from the cache ({fmt_bytes(size)})")
+            self._console(f"Cache full – removed {path.name} ({fmt_bytes(size)})")
 
     def cache_usage(self) -> int:
         try:
-            return sum(p.stat().st_size for p in self.cache_dir.rglob("*") if p.is_file())
+            seen = set()
+            total = 0
+            for p in self.cache_dir.rglob("*"):
+                if p.is_file():
+                    st = p.stat()
+                    if (st.st_dev, st.st_ino) in seen:
+                        continue
+                    seen.add((st.st_dev, st.st_ino))
+                    total += st.st_size
+            return total
         except OSError:
             return 0
 
     def clear_cache(self):
         if self.busy:
             return False
+        for name in ("store", "jobs", "tmp", "work"):
+            shutil.rmtree(self.cache_dir / name, ignore_errors=True)
+        for p in self.cache_dir.glob("*.zip.part"):      # leftovers of version 0.4
+            try:
+                p.unlink()
+            except OSError:
+                pass
         for d in self.cache_dir.iterdir():
-            if d.is_dir():
+            if d.is_dir() and (d / ".complete").exists():
                 shutil.rmtree(d, ignore_errors=True)
-            else:
-                try:
-                    d.unlink()
-                except OSError:
-                    pass
         return True
 
 
+INPUT_ERROR = __import__("re").compile(
+    r"(cannot (read|open|load)|can't (read|open|load)|unable to (read|open|load)|could not (read|open|load)|"
+    r"not found|no such file|failed to (read|open|load))", __import__("re").IGNORECASE)
+
+
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(4 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 class _PackageBroken(Exception):
+    pass
+
+
+class _Damaged(Exception):
     pass

@@ -105,12 +105,20 @@ Several computers can render the frames of one animation together, e.g. a Window
 4. Press **Start** on the coordinator.
 
 **How it works:**
-- **Job copy.** Before workers render a job, the coordinator makes a self-contained copy of it, once per version of the .blend:
-  - textures packed;
-  - every linked library, including libraries linked by libraries;
-  - external caches and sequences.
-  
-  Each worker downloads the copy once and keeps it in a cache (*keep up to … GB*). An interrupted download resumes.
+- **Job files.** Before workers render a job, the coordinator lists every file the job needs and writes copies of the .blend and its linked libraries (also libraries linked by libraries) with paths pointing to those files. Your originals aren't changed. Files are sent one by one and checked by checksum, in three groups:
+
+  | Group | Examples | Sent |
+  |---|---|---|
+  | Scene | the .blend and linked libraries | before the first frame; only changed files when you save again |
+  | Assets | textures, HDRIs, UDIM tiles, Alembic/USD, single VDBs, movies, fonts | once; kept on the worker by checksum and reused by every job that uses them |
+  | Frame files | image sequences, VDB sequences, simulation/fluid caches | **Smart**: only the files a frame needs, shortly before it renders (the next frame's files load while the current one renders), deleted afterwards. **Full copy**: everything before the first frame |
+
+  *Transfer to other computers* (job settings) chooses Smart (default) or Full copy. Smart falls back to Full copy on its own when a file turns out to be missing: Blender checks every file it refers to after opening the job, and a "cannot read" message while rendering also triggers the fallback. Such a frame is never delivered or counted as failed.
+- **Checks.** Every file is checksummed on the way in both directions. A damaged download is fetched again; a damaged frame upload is sent again. The coordinator remembers checksums, so big files are only read again when their size or date changes. Files that don't shrink by at least 10 % aren't compressed for transfer.
+- **Version check.** Coordinator and workers must run the same app version. A worker with another version is refused with "update the worker to …" instead of failing halfway.
+- **Consistency check** (job setting, on by default). Before a computer joins a job, it renders a frame that's already done, and the coordinator compares the two images in Blender. Noise differences between CPU and GPU average out; a missing add-on effect, other colours or missing textures don't. Computers whose frame looks different are left out of that job, and the test frame is kept in `data/consistency/` to look at. Untick the check to use them anyway. The check runs again when the job copy or that computer's device setting changes.
+- **Is it worth it?** A computer doesn't get one of the last frames if the others would finish all remaining frames before it finishes that one, counting render time plus moving its frame files. This avoids a slow computer holding up the end of a job.
+- **Unbaked simulations** can come out differently on another computer, so such jobs stay on the coordinator. Bake them to share the job.
 - **Frames.** Workers render one frame at a time and keep Blender open in between, so faster machines simply do more frames. Each finished frame is uploaded right away, and the worker deletes its copy once the coordinator has confirmed it.
 - **Who gets frames.** Frames only go to workers with the same Blender version (major.minor) and the add-ons the file uses. Add-ons are detected from node groups, custom properties and render handlers. The Machines tab says why a worker is idle. If a job's add-ons don't affect the image, tick *Other computers don't need this job's add-ons* in its job settings.
 - **Engines.** Cycles, EEVEE and Workbench work. Cycles uses each machine's own GPU settings (OptiX/CUDA, Metal).
@@ -126,9 +134,11 @@ Several computers can render the frames of one animation together, e.g. a Window
 
 Above the table are the combined figures and the speed of all machines together (frames per hour). The **Live** tab shows frames per machine for the selected job. `frames.csv` has a *machine* column, and `report.xlsx` has a **Machines** sheet with charts. The worker window shows its own session, all-time and per-job statistics. The status page has a Machines section too.
 
+The worker keeps downloaded files in its app data folder (on Windows `%APPDATA%\BlenderBatchRenderer\worker_cache`), or in a folder you choose with *Change folder…* in the worker window. The oldest files are deleted when *keep up to … GB* is reached. Choose a short folder path (e.g. `D:\bbr`) if your file names are long, because Windows limits the length of paths.
+
 Command line worker: `python -m bbr worker --code 123456` (finds the coordinator by itself) or `python -m bbr worker --server 192.168.1.20`.
 
-Not yet included in the job copy: simulation/fluid caches on disk (bake them into the file, or render those jobs on the coordinator). Third-party render engines aren't supported for sharing yet.
+Third-party render engines aren't supported for sharing yet.
 
 ## Blender add-on: "Send to Batch Renderer"
 
@@ -174,6 +184,12 @@ The queue itself lives in `~/Library/Application Support/BlenderBatchRenderer/` 
 ## Tests
 
 `python3 tests/test_engine.py` runs the engine against a simulated Blender (`tests/fake_blender.py`). The tests cover crashes, retries, stop/resume, quitting mid-render, broken files, video→PNG switching, overrides, Blender 5-style output, Blender restarts every N frames, a full disk, changed and missing .blend files, moved render folders, folders and the single-instance lock.
+
+`python3 tests/test_transfer.py` tests the file transfer:
+- Smart transfer with per-frame files and reuse across jobs;
+- damaged downloads and uploads;
+- the automatic switch to Full copy;
+- the version check, the consistency check, the "is it worth it" rule and remembered checksums.
 
 `python3 tests/test_distributed.py` simulates a coordinator with several workers. It covers:
 - job copies with nested linked libraries and add-on detection;

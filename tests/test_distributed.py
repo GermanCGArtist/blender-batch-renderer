@@ -9,7 +9,6 @@ import sys
 import tempfile
 import time
 import urllib.request
-import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -90,7 +89,8 @@ class Coordinator:
         self.url = f"http://127.0.0.1:{self.port}"
 
     def add(self, blend, **kw):
-        d = dict(render_root=os.path.join(TMP, "render"), retry_delay_s=0, make_preview=False)
+        d = dict(render_root=os.path.join(TMP, "render"), retry_delay_s=0, make_preview=False,
+                 consistency_check=False)
         d.update(kw)
         return self.q.add(blend, JobSettings(**d))
 
@@ -141,16 +141,23 @@ job = c.add(blend)
 job.ensure_folders()
 lines = []
 man = build_package(job, coord_inst, lines.append)
-check(man.get("hash") and (job.package_dir / man["file"]).exists(), "package zip written with hash")
-with zipfile.ZipFile(job.package_dir / man["file"]) as z:
-    names = sorted(z.namelist())
-    main = json.loads(z.read("main.blend"))
-    libs = {n: json.loads(z.read(n)) for n in names if n.startswith("libs/")}
+from bbr.package import load_manifest  # noqa: E402
+job.package = man
+M = load_manifest(job)
+vdir = job.package_dir / f"v_{man['hash']}"
+check(man.get("hash") and (vdir / "main.blend").exists(), "job copy written (version folder)")
+names = sorted(p for p, e in M["files"].items() if e["kind"] == "scene")
+main = json.loads((vdir / "main.blend").read_text())
+libs = {n: json.loads((vdir / n).read_text()) for n in names if n.startswith("libs/")}
 check("main.blend" in names and len(libs) == 3, f"main + 3 libraries (shared once) ({names})")
 check(all(p.startswith("//libs/") for p in main["libraries"]), "main file links point into libs/")
 check(all(p.startswith("//") and "/" not in p[2:] for d in libs.values() for p in d["libraries"]),
       "libraries link each other side by side")
-check(main["images"][0][1] is True, "textures packed into the file")
+check(main["images"][0][0].startswith("//a/") and main["images"][0][1] is False,
+      "textures are separate files, not packed")
+check(any(e["kind"] == "asset" and e["src"] == tex and e["hash"] for e in M["files"].values()),
+      "texture listed as an asset with its checksum")
+check(not list(job.package_dir.glob("*.zip")), "no zip any more")
 check(any("missing image" in w for w in man["warnings"]), "missing texture reported")
 check(man["addons_required"] == ["lens_sim"], f"LensSim detected as required ({man['addons_required']})")
 check(len(man["libraries"]) == 3 and man["blender"] == "4.2", "libraries + Blender version in manifest")
@@ -169,7 +176,7 @@ try:
 except CoordinatorError as e:
     check(e.status == 401, "wrong pairing code refused")
 req = urllib.request.Request(c.url + "/api/v1/worker/lease", data=b"{}", method="POST",
-                             headers={"X-BBR-Machine": "wnokey1"})
+                             headers={"X-BBR-Machine": "wnokey1", "X-BBR-Protocol": "2"})
 try:
     urllib.request.urlopen(req, timeout=5)
     check(False, "worker endpoint without key refused")
