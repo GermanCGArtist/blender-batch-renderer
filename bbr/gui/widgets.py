@@ -28,7 +28,8 @@ class OptionalSpin(QWidget):
         super().__init__()
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.check = QCheckBox("override")
+        self.check = QCheckBox()
+        self.check.setToolTip("Tick to override the value saved in the .blend file")
         self.spin = QSpinBox()
         self.spin.setRange(lo, hi)
         self.spin.setValue(default)
@@ -61,82 +62,111 @@ class JobSettingsForm(QWidget):
         form = QFormLayout(self)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
+        def row(label, widget, tip):
+            lab = QLabel(label)
+            lab.setToolTip(tip)
+            widget.setToolTip(tip)
+            form.addRow(lab, widget)
+
+        def section(title):
+            lab = QLabel(title)
+            lab.setStyleSheet("font-weight: 600; margin-top: 6px;")
+            form.addRow(lab)
+
         self.root = QLineEdit()
-        self.root.setPlaceholderText("empty = a 'render' folder next to each .blend file")
+        self.root.setPlaceholderText("next to each .blend")
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse)
-        row = QHBoxLayout()
-        row.addWidget(self.root, 1)
-        row.addWidget(browse)
+        row_l = QHBoxLayout()
+        row_l.addWidget(self.root, 1)
+        row_l.addWidget(browse)
         self._root_row = QWidget()
-        self._root_row.setLayout(row)
-        row.setContentsMargins(0, 0, 0, 0)
+        self._root_row.setLayout(row_l)
+        row_l.setContentsMargins(0, 0, 0, 0)
+        section("Output")
         if show_root:
-            form.addRow("Render folder", self._root_row)
+            row("Render folder", self._root_row,
+                "Where the job's folder is created. Empty: a folder called “render” next to each .blend file.")
 
         self.blender = QComboBox()
-        form.addRow("Blender", self.blender)
+        row("Blender", self.blender,
+            "Which Blender renders the job. Auto: the install that matches the version the file was saved "
+            "with, otherwise the next newer one.")
 
         self.frame_start = OptionalSpin(-1_000_000, 1_000_000, 1)
         self.frame_end = OptionalSpin(-1_000_000, 1_000_000, 250)
         self.samples = OptionalSpin(1, 1_000_000, 128)
         self.res_pct = OptionalSpin(1, 1000, 100, " %")
         if show_overrides:
-            form.addRow("Start frame", self.frame_start)
-            form.addRow("End frame", self.frame_end)
-            form.addRow("Samples", self.samples)
-            form.addRow("Resolution", self.res_pct)
+            section("Overrides (unticked = as saved in the file)")
+            row("Start frame", self.frame_start, "First frame to render. Unticked: the scene's start frame.")
+            row("End frame", self.frame_end, "Last frame to render. Unticked: the scene's end frame.")
+            row("Samples", self.samples, "Render samples (Cycles or EEVEE). Unticked: as saved in the file.")
+            row("Resolution", self.res_pct, "Resolution scale in percent. Unticked: as saved in the file.")
 
+        section("When something goes wrong")
         self.max_attempts = QSpinBox()
         self.max_attempts.setRange(1, 100)
-        form.addRow("Attempts per frame", self.max_attempts)
+        row("Attempts", self.max_attempts,
+            "How often a frame is tried before it is marked as failed and skipped. Also counts for loading the "
+            "file.")
         self.retry_delay = QSpinBox()
         self.retry_delay.setRange(0, 24 * 3600)
         self.retry_delay.setSuffix(" s")
-        form.addRow("Wait before retry", self.retry_delay)
+        row("Retry delay", self.retry_delay, "Pause before Blender is started again after a failure.")
         self.timeout = QDoubleSpinBox()
         self.timeout.setRange(0, 7 * 24 * 60)
         self.timeout.setDecimals(1)
         self.timeout.setSuffix(" min")
-        self.timeout.setSpecialValueText("no limit")
-        form.addRow("Frame timeout", self.timeout)
+        self.timeout.setSpecialValueText("off")
+        row("Frame timeout", self.timeout,
+            "A frame that takes longer than this is stopped and counts as a failed attempt. Off: no limit.")
         self.restart_every = QSpinBox()
         self.restart_every.setRange(0, 100000)
         self.restart_every.setSuffix(" frames")
         self.restart_every.setSpecialValueText("never")
-        self.restart_every.setToolTip("Start a fresh Blender process every N frames. Helps when Blender's memory "
-                                      "grows over a long sequence; costs one file load each time.")
-        form.addRow("Restart Blender every", self.restart_every)
-        self.preview = QCheckBox("Make an MP4 preview when the job finishes")
+        row("Restart Blender", self.restart_every,
+            "Start a fresh Blender every N frames. Helps when Blender's memory grows over a long sequence; "
+            "costs one file load each time.")
+
+        section("Extras")
+        self.preview = QCheckBox("MP4 preview")
+        self.preview.setToolTip("Make preview/<job>.mp4 from the frames when the job is finished.")
         form.addRow("", self.preview)
-        self.preflight = QCheckBox("Check the file first (missing textures, unbaked sims …)")
+        self.preflight = QCheckBox("Check file first")
+        self.preflight.setToolTip("Before the first frame, look for missing textures and linked files, unbaked "
+                                  "simulations and other common problems. Results appear under Issues.")
         form.addRow("", self.preflight)
-        self.ignore_addons = QCheckBox("Other computers don't need this job's add-ons")
-        self.ignore_addons.setToolTip("Workers render this job even without the add-ons it seems to use. "
-                                      "Only for add-ons that don't change the image – otherwise frames from "
-                                      "other computers look different.")
-        form.addRow("", self.ignore_addons)
+
+        section("Other computers")
         self.transfer = QComboBox()
-        self.transfer.addItem("Smart – files once, frame files when needed", "smart")
-        self.transfer.addItem("Full copy – everything before the first frame", "full")
-        self.transfer.setToolTip("How other computers get this job's files. Smart sends textures, caches and "
-                                 "libraries once (and reuses them for other jobs), and image/VDB sequences frame by "
-                                 "frame. Full copy sends every file before the first frame – slower to start, "
-                                 "but nothing can be missing later. Smart falls back to Full copy by itself when "
-                                 "a file turns out to be missing.")
-        form.addRow("Transfer to other computers", self.transfer)
-        self.consistency = QCheckBox("Check that other computers' frames look the same (test frame first)")
-        self.consistency.setToolTip("Before a computer joins this job it renders a frame that is already done "
-                                    "and the two images are compared. Computers whose frame looks different "
+        self.transfer.addItem("Smart", "smart")
+        self.transfer.addItem("Full copy", "full")
+        self.transfer.setItemData(0, "Textures, caches and libraries are sent once and reused; image and VDB "
+                                     "sequences frame by frame, just before each frame.", Qt.ItemDataRole.ToolTipRole)
+        self.transfer.setItemData(1, "Every file is sent before the first frame. Slower to start, nothing can be "
+                                     "missing later.", Qt.ItemDataRole.ToolTipRole)
+        row("File transfer", self.transfer,
+            "How workers get this job's files.\nSmart: textures, caches and libraries once (reused by other jobs), "
+            "image/VDB sequences frame by frame.\nFull copy: everything before the first frame.\nSmart switches "
+            "to Full copy by itself if a file turns out to be missing.")
+        self.consistency = QCheckBox("Test frame")
+        self.consistency.setToolTip("Before a computer joins this job, it renders a frame that is already done and "
+                                    "the two images are compared. Computers whose frame looks different "
                                     "(missing add-on effect, other colours, missing textures) are left out.")
         form.addRow("", self.consistency)
+        self.ignore_addons = QCheckBox("Ignore add-ons")
+        self.ignore_addons.setToolTip("Workers may render this job even without the add-ons it seems to use. "
+                                      "Only for add-ons that don't change the image – otherwise their frames "
+                                      "look different.")
+        form.addRow("", self.ignore_addons)
         if machines_provider is not None:
             self.devices_box = QWidget()
             self.devices_lay = QFormLayout(self.devices_box)
             self.devices_lay.setContentsMargins(0, 0, 0, 0)
-            self.devices_box.setToolTip("Cycles only. GPU uses the GPU set in that computer's Blender preferences "
-                                        "(or the first one found). Off = that computer never renders this job.")
-            form.addRow("Device per computer", self.devices_box)
+            row("Devices", self.devices_box,
+                "Per computer: render on the GPU or CPU, or not at all (Off). Cycles only.\nGPU uses the GPU chosen "
+                "in that computer's Blender preferences, or the first one found.")
             self.reload_machines()
         self.reload_installs()
 
@@ -148,15 +178,18 @@ class JobSettingsForm(QWidget):
     def reload_installs(self):
         cur = self.blender.currentData()
         self.blender.clear()
-        self.blender.addItem("Auto (match the version the file was saved with)", "auto")
+        self.blender.addItem("Auto", "auto")
+        self.blender.setItemData(0, "The install matching the version the file was saved with, otherwise the next "
+                                    "newer one", Qt.ItemDataRole.ToolTipRole)
         for inst in self.installs_provider():
-            self.blender.addItem(f"{inst.label}  –  {inst.path}", inst.path)
+            self.blender.addItem(inst.label, inst.path)
+            self.blender.setItemData(self.blender.count() - 1, inst.path, Qt.ItemDataRole.ToolTipRole)
         if cur:
             i = self.blender.findData(cur)
             if i >= 0:
                 self.blender.setCurrentIndex(i)
 
-    DEVICE_CHOICES = (("As saved in the file", ""), ("GPU", "gpu"), ("CPU", "cpu"), ("Off – not on this computer", "off"))
+    DEVICE_CHOICES = (("From file", ""), ("GPU", "gpu"), ("CPU", "cpu"), ("Off", "off"))
 
     def reload_machines(self, keep_choices: bool = True):
         if self.machines_provider is None:

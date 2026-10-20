@@ -14,8 +14,13 @@ from ..parse import fmt_duration, fmt_bytes
 
 STATE_COLORS = {"rendering": "#3d8bfd", "downloading": "#c678dd", "loading": "#7aa2f7", "idle": "#2fa84f",
                 "paused": "#e67e22", "error": "#dc3545", "offline": "#888888"}
-COLS = ["On", "Machine", "State", "Working on", "Device", "Blender / add-ons", "Frames", "Avg frame",
-        "Failed", "Data (speed)", "All time"]
+COLS = ["On", "Machine", "State", "Working on", "Device", "Blender", "Frames", "Avg frame",
+        "Failed", "Data", "All time"]
+COL_TIPS = ["Off: this computer gets no frames (when no batch is running)", "", "What the computer is doing now",
+            "Job and frame it renders, or why it is idle", "GPU or CPU it renders with",
+            "Blender versions and add-ons installed there", "Frames delivered in this batch",
+            "Average render time per frame in this batch", "Failed attempts in this batch",
+            "Data sent in this batch (measured transfer speed)", "Frames and render time since it was paired"]
 
 
 def _state_text(m: dict) -> str:
@@ -37,12 +42,13 @@ class MachinesPanel(QWidget):
 
         g = QGroupBox("Sharing")
         gl = QGridLayout(g)
-        self.share = QCheckBox("Share jobs with worker computers on my home network")
+        self.share = QCheckBox("Share jobs with workers")
         self.share.setChecked(settings.share_with_workers)
-        self.share.setToolTip("Worker computers ask this one for frames, download a self-contained copy of each "
-                              "job once and send the finished frames back. The frames end up here.")
+        self.share.setToolTip("Other computers on your home network (in Worker mode) render frames of this queue. "
+                              "They get the files they need from here and send the finished frames back.")
         self.local = QCheckBox("This computer renders too")
         self.local.setChecked(settings.render_locally)
+        self.local.setToolTip("Off: this computer only hands out frames and collects them")
         self.code = QLabel()
         self.code.setStyleSheet("font-size: 18px; font-weight: 600; letter-spacing: 3px;")
         self.code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -55,7 +61,10 @@ class MachinesPanel(QWidget):
         self.addr.setWordWrap(True)
         gl.addWidget(self.share, 0, 0, 1, 3)
         gl.addWidget(self.local, 1, 0, 1, 3)
-        gl.addWidget(QLabel("Pairing code for new workers:"), 2, 0)
+        plab = QLabel("Pairing code")
+        plab.setToolTip("A new worker enters this code once. Each code works for one pairing and then changes.")
+        self.code.setToolTip(plab.toolTip())
+        gl.addWidget(plab, 2, 0)
         gl.addWidget(self.code, 2, 1)
         gl.addWidget(new_code, 2, 2)
         gl.addWidget(self.addr, 3, 0, 1, 3)
@@ -73,6 +82,9 @@ class MachinesPanel(QWidget):
 
         self.table = QTableWidget(0, len(COLS))
         self.table.setHorizontalHeaderLabels(COLS)
+        for i, tip in enumerate(COL_TIPS):
+            if tip:
+                self.table.horizontalHeaderItem(i).setToolTip(tip)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)

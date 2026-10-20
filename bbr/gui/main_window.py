@@ -158,10 +158,10 @@ class MainWindow(QMainWindow):
                              "Encode the frames finished so far into preview/<job>.mp4")
         self.a_play = act("Play preview", self.play_preview, None, "Open the preview video  (Space)")
         self.a_folder = act("Open render folder", self.open_folder, None, "Open the job's render folder  (↩)")
-        self.a_report = act("Open report.xlsx", self.open_report, None, "Open the job's Excel report")
+        self.a_report = act("Open report", self.open_report, None, "Open the job's Excel report (data/report.xlsx)")
         self.a_settings = act("Settings…", self.open_settings, "Ctrl+,", "Blender installs, defaults, API")
         self.a_settings.setMenuRole(QAction.MenuRole.PreferencesRole)
-        self.a_status_page = act("Open status page in browser", self.open_status_page, None,
+        self.a_status_page = act("Status page", self.open_status_page, None,
                                  "The status page shows progress in any browser – also on your phone")
         self.a_shortcuts = act("Keyboard shortcuts", self.show_shortcuts, "Ctrl+/", "List of keyboard shortcuts")
         self.a_docs = act("Documentation", self.open_docs, None, "Open the user guide (PDF)")
@@ -192,8 +192,12 @@ class MainWindow(QMainWindow):
         mt.addWidget(spacer)
         mt.addWidget(QLabel("Mode: "))
         self.mode_box = QComboBox()
-        self.mode_box.addItem("Coordinator – keeps the queue", "coordinator")
-        self.mode_box.addItem("Worker – renders for another computer", "worker")
+        self.mode_box.addItem("Coordinator", "coordinator")
+        self.mode_box.addItem("Worker", "worker")
+        self.mode_box.setItemData(0, "This computer keeps the queue (and can share frames with workers)",
+                                  Qt.ItemDataRole.ToolTipRole)
+        self.mode_box.setItemData(1, "This computer renders frames for a coordinator on the home network",
+                                  Qt.ItemDataRole.ToolTipRole)
         self.mode_box.setToolTip("Coordinator: this computer has the queue and can share frames with workers.\n"
                                  "Worker: this computer renders frames for a coordinator on the home network.\n"
                                  "Locked while something is rendering.")
@@ -222,7 +226,10 @@ class MainWindow(QMainWindow):
             qm.addSeparator() if a is None else qm.addAction(a)
         self.queue_menu = qm
         mb.addMenu(self.job_menu)
+        for m in (fm, qm, self.job_menu, self.recent_menu):
+            m.setToolTipsVisible(True)
         hm = mb.addMenu("Help")
+        hm.setToolTipsVisible(True)
         for a in (self.a_status_page, None, self.a_shortcuts, self.a_docs):
             hm.addSeparator() if a is None else hm.addAction(a)
 
@@ -272,10 +279,14 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_settings_tab(), "Job settings")
         self.issues = QPlainTextEdit()
         self.issues.setReadOnly(True)
-        self.tabs.addTab(self.issues, "Issues && history")
+        self.tabs.addTab(self.issues, "Issues")
+        self.tabs.setTabToolTip(0, "Live progress of the selected job")
+        self.tabs.setTabToolTip(1, "Settings of the selected job")
+        self.tabs.setTabToolTip(2, "Problems, failed frames and all Blender runs of the selected job")
         self.machines_panel = MachinesPanel(self.runner, self.settings, self.api)
         self.machines_panel.settings_changed.connect(self._start_api)
         self.tabs.addTab(self.machines_panel, "Machines")
+        self.tabs.setTabToolTip(3, "Computers that render this queue, with statistics")
         hsplit.addWidget(self.tabs)
         hsplit.setStretchFactor(0, 2)
         hsplit.setStretchFactor(1, 3)
@@ -287,12 +298,14 @@ class MainWindow(QMainWindow):
         cl = QVBoxLayout(cw)
         cl.setContentsMargins(0, 0, 0, 0)
         crow = QHBoxLayout()
-        self.follow = QCheckBox("Follow the rendering job")
+        self.follow = QCheckBox("Follow active job")
+        self.follow.setToolTip("Show the console of the job that is rendering, instead of the selected one")
         self.follow.setChecked(True)
         self.console_title = QLabel()
         clear = QPushButton("Clear")
         clear.clicked.connect(self._clear_console)
-        open_log = QPushButton("Open logs folder")
+        open_log = QPushButton("Logs folder")
+        open_log.setToolTip("Open the selected job's logs folder (full Blender output of every run)")
         open_log.clicked.connect(lambda: self._open_path(self._sel() and self._sel().logs_dir))
         crow.addWidget(self.console_title, 1)
         crow.addWidget(self.follow)
@@ -305,7 +318,8 @@ class MainWindow(QMainWindow):
         self.console.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
         self.console.setMaximumBlockCount(self.settings.console_lines)
         cl.addWidget(self.console)
-        bottom.addTab(cw, "Blender console")
+        bottom.addTab(cw, "Console")
+        bottom.setTabToolTip(0, "Blender's output")
         self.messages = QListWidget()
         bottom.addTab(self.messages, "Messages")
         self.bottom_tabs = bottom
@@ -338,9 +352,15 @@ class MainWindow(QMainWindow):
         f1.addWidget(self.l_frame, 0, 0, 1, 2)
         f1.addWidget(self.l_phase, 1, 0, 1, 2)
         f1.addWidget(self.frame_bar, 2, 0, 1, 2)
-        for r, (k, v) in enumerate((("Elapsed", self.l_frame_time), ("Blender says remaining", self.l_frame_remaining),
-                                    ("Memory (now / Blender peak)", self.l_mem)), start=3):
-            f1.addWidget(QLabel(k), r, 0)
+        for r, (k, v, tip) in enumerate((
+                ("Elapsed", self.l_frame_time, "Time spent on this frame so far"),
+                ("Remaining", self.l_frame_remaining, "Blender's own estimate for the rest of this frame"),
+                ("Memory", self.l_mem, "Memory of the Blender process now / Blender's own peak for this frame")),
+                start=3):
+            lab = QLabel(k)
+            lab.setToolTip(tip)
+            v.setToolTip(tip)
+            f1.addWidget(lab, r, 0)
             f1.addWidget(v, r, 1)
         row.addWidget(g1, 1)
 
@@ -351,9 +371,25 @@ class MainWindow(QMainWindow):
         self.job_labels = {}
         keys = ["Frames", "Average frame", "Time remaining", "Finishes at", "Disk used / projected",
                 "Render time so far", "Blender runs", "Blender", "Engine / device", "Machines"]
+        shown = {"Average frame": ("Avg frame", "Average render time of the last 10 frames (fastest / slowest)"),
+                 "Time remaining": ("Remaining", "Estimated time until the job is done, using all computers "
+                                                 "that render it"),
+                 "Finishes at": ("Done at", "Estimated clock time when the job is finished"),
+                 "Disk used / projected": ("Disk", "Space used by finished frames / expected for the whole job"),
+                 "Render time so far": ("Render time", "Render time of all finished frames added up"),
+                 "Blender runs": ("Blender runs", "How often Blender was started for this job (retries, "
+                                                  "planned restarts)"),
+                 "Blender": ("Blender", "Which install renders the job, and why"),
+                 "Engine / device": ("Engine", "Render engine and device, samples and resolution"),
+                 "Machines": ("Machines", "Frames per computer, and what each one is rendering now"),
+                 "Frames": ("Frames", "Finished, failed and remaining frames")}
         for r, k in enumerate(keys, start=1):
-            f2.addWidget(QLabel(k), r, 0)
+            text, tip = shown.get(k, (k, ""))
+            lab = QLabel(text)
+            lab.setToolTip(tip)
+            f2.addWidget(lab, r, 0)
             v = QLabel("–")
+            v.setToolTip(tip)
             v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             v.setWordWrap(True)
             f2.addWidget(v, r, 1)
@@ -384,7 +420,9 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         self.l_form_note = QLabel()
         self.l_form_note.setWordWrap(True)
-        self.b_apply = QPushButton("Apply to this job")
+        self.b_apply = QPushButton("Apply")
+        self.b_apply.setToolTip("Save these settings for the selected job. They apply the next time it renders; "
+                                "finished frames are kept.")
         self.b_apply.clicked.connect(self._apply_job_settings)
         row.addWidget(self.l_form_note, 1)
         row.addWidget(self.b_apply)

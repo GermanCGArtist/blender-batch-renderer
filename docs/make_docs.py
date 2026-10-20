@@ -186,7 +186,7 @@ def window_diagram():
     # right tabs
     rx_, ry_, rw, rh = 204, 104, 270, 128
     d.add(Rect(rx_, ry_, rw, rh, fillColor=colors.white, strokeColor=LINE))
-    for i, t in enumerate(("Live", "Job settings", "Issues & history")):
+    for i, t in enumerate(("Live", "Job settings", "Issues")):
         d.add(Rect(rx_ + 4 + i * 62, ry_ + rh - 14, 58, 11, fillColor=TINT if i else NAVY2, strokeColor=LINE))
         d.add(String(rx_ + 33 + i * 62, ry_ + rh - 11, t, fontName="Body", fontSize=5.8,
                      fillColor=colors.white if i == 0 else INK, textAnchor="middle"))
@@ -209,7 +209,7 @@ def window_diagram():
     # console
     d.add(Rect(8, 8, W - 16, 90, fillColor=colors.white, strokeColor=LINE))
     d.add(Rect(12, 84, 70, 11, fillColor=NAVY2, strokeColor=LINE))
-    d.add(String(47, 87, "Blender console", fontName="Body", fontSize=5.8, fillColor=colors.white,
+    d.add(String(47, 87, "Console", fontName="Body", fontSize=5.8, fillColor=colors.white,
                  textAnchor="middle"))
     d.add(Rect(84, 84, 50, 11, fillColor=TINT, strokeColor=LINE))
     d.add(String(109, 87, "Messages", fontName="Body", fontSize=5.8, fillColor=INK, textAnchor="middle"))
@@ -494,10 +494,11 @@ def build():
         ["C", "Queue", "Jobs and folders in render order, each with status, progress, frames, Blender version and "
               "ETA. Checkboxes switch jobs or whole folders on/off. Drag to reorder or move between folders; drop "
               ".blend files to add them."],
-        ["D", "Detail tabs", "<b>Live</b>, <b>Job settings</b> and <b>Issues &amp; history</b> for the selected job."],
+        ["D", "Detail tabs", "<b>Live</b>, <b>Job settings</b> and <b>Issues</b> for the selected job."],
         ["E", "Console &amp; messages", "Blender's console output (follows the rendering job, or shows the selected "
               "one) and a log of the app's own messages, warnings and errors."],
     ], [8, 34, 128], bold_first=True))
+    s.append(P("<b>Tip:</b> hover the mouse over any setting, button, column header or label to see what it does."))
     s.append(H2("3.1  Live tab"))
     s += bullets([
         "<b>Current frame</b> – frame number, sample progress (e.g. <i>sample 64/128</i>), elapsed time, "
@@ -512,7 +513,7 @@ def build():
     s.append(H2("3.2  Job settings tab"))
     s.append(P("Shows and edits the selected job's settings (see chapter 9). Changes apply the next time the job "
                "renders; finished frames are kept. Settings cannot be changed while the job is rendering."))
-    s.append(H2("3.3  Issues &amp; history tab"))
+    s.append(H2("3.3  Issues tab"))
     s.append(P("Everything that went wrong or needs attention for this job: notes from Blender (e.g. video output "
                "switched to PNG), the overrides applied, preflight results, every frame that failed or is waiting "
                "for a retry with its last error, and a list of all Blender runs with start time, duration, frames "
@@ -641,7 +642,7 @@ def build():
     s.append(H2("6.1  Frame failures"))
     s.append(P("If Blender crashes or reports an error while rendering a frame, that frame's attempt counter goes up, "
                "the console log is copied to <font face='Mono'>logs/crashes/</font> together with Blender's own crash "
-               "report, and Blender is started again after <b>Wait before retry</b>. After <b>Attempts per frame</b> "
+               "report, and Blender is started again after <b>Retry delay</b>. After <b>Attempts</b> "
                "failed attempts the frame is marked <i>failed</i> and the job continues with the next frame. "
                "Failed frames are listed in the Issues tab and in the reports."))
     s.append(H2("6.2  Files that will not render"))
@@ -652,10 +653,10 @@ def build():
     s.append(H2("6.3  Frame timeout"))
     s.append(P("With a <b>Frame timeout</b> set, a frame that takes longer is ended and counted as a failed attempt – "
                "useful against renders that hang. Leave it at <i>no limit</i> unless you know your frame times."))
-    s.append(H2("6.4  Restart Blender every N frames"))
+    s.append(H2("6.4  Restart Blender"))
     s.append(P("Normally one Blender process renders all remaining frames of a job, which saves loading time. Over a "
-               "long sequence Blender's memory use can grow until it crashes. With <b>Restart Blender every N "
-               "frames</b>, a fresh Blender is started after every N frames. These planned restarts are never "
+               "long sequence Blender's memory use can grow until it crashes. With <b>Restart Blender</b> set to N "
+               "frames, a fresh Blender is started after every N frames. These planned restarts are never "
                "counted as failures; the cost is one file load per restart."))
 
     # 7 ----------------------------------------------------------------
@@ -714,42 +715,42 @@ def build():
         ["Start frame / End frame", "from file", "Override the frame range. Unticked = use the file's range."],
         ["Samples", "from file", "Override render samples (Cycles samples or EEVEE render samples)."],
         ["Resolution", "from file", "Override the resolution percentage."],
-        ["Attempts per frame", "3", "How often a frame (or loading the file) is tried before giving up."],
-        ["Wait before retry", "30 s", "Pause before Blender is started again after a failure."],
+        ["Attempts", "3", "How often a frame (or loading the file) is tried before giving up."],
+        ["Retry delay", "30 s", "Pause before Blender is started again after a failure."],
         ["Frame timeout", "no limit", "End a frame that takes longer than this; counts as a failed attempt."],
-        ["Restart Blender every", "never", "Fresh Blender process every N frames (6.4)."],
-        ["Make an MP4 preview", "on", "Build the preview video when the job finishes."],
-        ["Check the file first", "off", "Run the preflight check (chapter 12) before the first render of the job."],
-        ["Other computers don't need this job's add-ons", "off", "Workers render the job even without the add-ons "
+        ["Restart Blender", "never", "Fresh Blender process every N frames (6.4)."],
+        ["MP4 preview", "on", "Build the preview video when the job finishes."],
+        ["Check file first", "off", "Run the preflight check (chapter 12) before the first render of the job."],
+        ["Ignore add-ons", "off", "Workers render the job even without the add-ons "
                                                                  "it seems to use (15.2)."],
-        ["Transfer to other computers", "Smart", "Smart: files once, frame files when needed; Full copy: "
+        ["File transfer", "Smart", "Smart: files once, frame files when needed; Full copy: "
                                                  "everything before the first frame (15.3)."],
-        ["Check that other computers' frames look the same", "on", "Test frame before a computer joins (15.4)."],
-        ["Device per computer", "as saved in the file", "For each computer: GPU, CPU, or Off (never renders this "
+        ["Test frame", "on", "Test frame before a computer joins (15.4)."],
+        ["Devices", "as saved in the file", "For each computer: GPU, CPU, or Off (never renders this "
                                                         "job). Cycles only (15.2)."],
     ], [44, 30, 96]))
     s.append(H2("9.2  App settings"))
     s.append(table([
         ["Setting", "Default", "Description"],
         ["Blender installs", "found automatically", "List of installs with their versions; Add…, Remove, Scan."],
-        ["Keep the computer awake", "on", "Prevent sleep while a batch runs."],
-        ["Resume automatically", "off", "Restart an interrupted batch when the app launches."],
-        ["Console lines kept per job", "5000", "How much Blender output the console keeps in memory (the log files "
+        ["Keep awake while rendering", "on", "Prevent sleep while a batch runs."],
+        ["Resume on start", "off", "Restart an interrupted batch when the app launches."],
+        ["Console lines", "5000", "How much Blender output the console keeps in memory (the log files "
                                               "always contain everything)."],
-        ["Stop when free disk space is below", "5 GB", "Disk-space limit for 7.1."],
-        ["Run the status page and API", "on", "Chapter 13."],
+        ["Min. free space", "5 GB", "Disk-space limit for 7.1."],
+        ["Status page and API", "on", "Chapter 13."],
         ["Port", "8642", "Network port of the status page and API."],
-        ["Allow other devices on my home network", "off", "Makes the status page reachable from phones and other "
+        ["Home network access", "off", "Makes the status page reachable from phones and other "
                                                            "computers at home; they need the key."],
-        ["Key for other devices", "random", "Part of the link for other devices; <i>New key</i> locks out old links."],
+        ["Access key", "random", "Part of the link for other devices; <i>New key</i> locks out old links."],
         ["Mode (top right)", "Coordinator", "Coordinator keeps the queue; Worker renders for a coordinator (15)."],
-        ["Share jobs with worker computers", "off", "Machines tab: other computers may render frames of the queue."],
+        ["Share jobs with workers", "off", "Machines tab: other computers may render frames of the queue."],
         ["This computer renders too", "on", "Machines tab: off = the coordinator only hands out frames."],
         ["Pairing code", "random", "Machines tab: 6 digits a new worker enters once; <i>New code</i> for new workers."],
         ["Worker: keep downloaded jobs up to", "50 GB", "Worker window: size of the cache of job copies (15.8)."],
         ["Worker: connect automatically when the app starts", "off", "Otherwise press <i>Connect</i> in the "
                                                                      "worker window (15.1)."],
-        ["Worker: folder for downloaded files", "app data folder", "Worker window: <i>Change folder…</i> (15.8)."],
+        ["Worker: folder for downloaded files", "app data folder", "Worker window: <i>Folder…</i> (15.8)."],
     ], [52, 34, 84]))
     s.append(H2("9.3  What the app changes in your file"))
     s.append(P("Only in the background Blender session – <b>the .blend file itself is never saved or modified</b>:"))
@@ -808,7 +809,7 @@ def build():
 
     # 11 ---------------------------------------------------------------
     s.append(H1("11  Preview video"))
-    s.append(P("When a job finishes (if <i>Make an MP4 preview</i> is on), or when you choose <b>Create preview</b>, "
+    s.append(P("When a job finishes (if <i>MP4 preview</i> is on), or when you choose <b>Create preview</b>, "
                "the finished frames are loaded into Blender's video editor in a second, add-on-free Blender run and "
                "encoded as H.264 MP4 at the scene's frame rate and output resolution (rounded to even pixels). The "
                "result is <font face='Mono'>preview/&lt;name&gt;.mp4</font>; double-click a job's folder or "
@@ -822,7 +823,7 @@ def build():
 
     # 12 ---------------------------------------------------------------
     s.append(H1("12  Preflight check"))
-    s.append(P("With <i>Check the file first</i> enabled, Blender opens the file once before the first render and "
+    s.append(P("With <i>Check file first</i> enabled, Blender opens the file once before the first render and "
                "reports problems, which appear as warnings and in the Issues tab (and in "
                "<font face='Mono'>data/preflight.json</font>). The job still renders – the check informs, it does not "
                "block. It looks for:"))
@@ -839,7 +840,7 @@ def build():
     # 13 ---------------------------------------------------------------
     s.append(H1("13  Status page &amp; API"))
     s.append(P("While the app is open it runs a small web server. In a browser it shows a <b>status page</b>; for other "
-               "programs it offers an <b>API</b>. Open the page with <i>Help → Open status page in browser</i> or at "
+               "programs it offers an <b>API</b>. Open the page with <i>Help → Status page</i> or at "
                "<font face='Mono'>http://127.0.0.1:8642/</font>."))
     s.append(H2("13.1  The status page"))
     s += bullets([
@@ -852,8 +853,8 @@ def build():
         "It refreshes every two seconds and adapts to phone screens and dark mode.",
     ])
     s.append(H2("13.2  On your phone or another computer"))
-    s.append(P("In <i>Settings → Status page &amp; API</i>, tick <b>Allow other devices on my home network</b>. "
-               "<i>Copy link for other devices</i> copies a link such as <font face='Mono'>http://192.168.1.20:8642/?key=…"
+    s.append(P("In <i>Settings → Status page &amp; API</i>, tick <b>Home network access</b>. "
+               "<i>Copy link</i> copies a link such as <font face='Mono'>http://192.168.1.20:8642/?key=…"
                "</font>; open it on the phone (and add it to the home screen). Devices without the key are refused."))
     s.append(note("Away from home the app is not reachable – on purpose. If you want that, use a VPN such as "
                   "Tailscale (your phone then behaves as if it were at home). Do not open a port on your router.",
@@ -938,18 +939,18 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "<b>On every computer</b>: install the app and the Blender version(s) your files need, plus the add-ons your "
         "scenes use (for example LensSim). Add-ons are not copied between machines – each one needs its own "
         "installation (and licence). Enable them in Blender's preferences as usual.",
-        "<b>On the coordinator</b>: open the <b>Machines</b> tab and tick <i>Share jobs with worker computers</i>. "
+        "<b>On the coordinator</b>: open the <b>Machines</b> tab and tick <i>Share jobs with workers</i>. "
         "The tab shows a 6-digit <b>pairing code</b> and the address workers connect to. When the firewall asks, "
         "allow incoming connections for the app.",
         "<b>On each worker</b>: switch the mode (top right of the window) to <b>Worker</b>. Press <i>Find on "
         "network</i> (or type the coordinator's address), enter the pairing code and press <i>Pair</i>. This is "
         "needed only once. Afterwards the worker connects only when you press <b>Connect</b> in its window – or by "
-        "itself when the app starts, if you tick <i>Connect automatically when the app starts</i>. "
+        "itself when the app starts, if you tick <i>Connect on start</i>. "
         "<b>Disconnect</b> stops it (not while it is rendering: pause or stop first).",
         "Press <b>Start</b> on the coordinator as usual. Workers that are online and switched on join in.",
     ])
     s.append(note("The mode switch, sharing and the worker's settings are <b>locked while something is rendering</b>. "
-                  "On a worker, use <i>Pause after this frame</i> or <i>Stop now</i> instead.", "Locked while rendering"))
+                  "On a worker, use <i>Pause after frame</i> or <i>Stop now</i> instead.", "Locked while rendering"))
     s.append(H2("15.2  What happens"))
     s += bullets([
         "<b>The job's files.</b> Before the first worker renders a job, the coordinator lists every file the job "
@@ -965,10 +966,10 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "<b>Add-ons and versions.</b> The coordinator detects which add-ons a file uses (from its node groups, "
         "custom properties and render handlers) and gives frames only to workers with the same Blender version "
         "(major.minor) and those add-ons enabled. The Machines tab shows why a worker gets no frames. If the add-ons "
-        "do not change the image, tick <i>Other computers don't need this job's add-ons</i> in the job settings.",
+        "do not change the image, tick <i>Ignore add-ons</i> in the job settings.",
         "<b>Render engines.</b> Cycles, EEVEE and Workbench are supported. Cycles uses each worker's own device "
         "preferences (OptiX/CUDA on NVIDIA, Metal on Apple Silicon); the device shows in the Machines tab.",
-        "<b>Device per computer.</b> In a job's settings, choose for each computer <i>As saved in the file</i>, "
+        "<b>Devices.</b> In a job's settings, choose for each computer <i>From file</i>, "
         "<i>GPU</i>, <i>CPU</i> or <i>Off</i>. For example, a scene using an add-on that only works on NVIDIA "
         "GPUs renders on the PC's GPU and on the Mac's CPU (or is switched off there); a scene that needs more "
         "VRAM than the PC has renders on the Mac's GPU and is switched off for the PC. <i>GPU</i> uses the GPU set "
@@ -985,7 +986,7 @@ curl -X POST -H "X-BBR-Request: 1" \\
          "the current one renders), deleted afterwards. <b>Full copy</b>: all before the first frame."],
     ], [26, 64, 80]))
     s += bullets([
-        "<b>Transfer to other computers</b> (job setting): <i>Smart</i> (default) or <i>Full copy</i>. Only frame "
+        "<b>File transfer</b> (job setting): <i>Smart</i> (default) or <i>Full copy</i>. Only frame "
         "files the job's frame range actually uses are sent at all. For caches, the neighbouring frames are "
         "included, because motion blur reads them.",
         "<b>Automatic fallback.</b> After opening the job, the worker's Blender checks every file the scene refers "
@@ -1004,7 +1005,7 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "coordinator until they are baked.",
     ])
     s.append(H2("15.4  Consistency check and the last frames"))
-    s.append(P("With <i>Check that other computers' frames look the same</i> (job setting, on by default), a computer "
+    s.append(P("With <i>Test frame</i> (job setting, on by default), a computer "
                "that joins a job first renders a frame that is already finished. The coordinator compares the two "
                "images in Blender, block by block, so render noise – which differs between CPU, GPU and GPU makers – "
                "averages out, while a missing add-on effect, other colours or missing textures stand out. A computer "
@@ -1060,7 +1061,7 @@ curl -X POST -H "X-BBR-Request: 1" \\
         ["Job files on the coordinator", "<font face='Mono'>&lt;job folder&gt;/package/v_&lt;version&gt;/</font> – "
                                          "the .blend copies and the file list; renewed when the scene changes."],
         ["Files on a worker", "<font face='Mono'>worker_cache/</font> in the app data folder (10.3), or the folder "
-                              "chosen with <i>Change folder…</i>: <font face='Mono'>store/</font> (files by checksum), "
+                              "chosen with <i>Folder…</i>: <font face='Mono'>store/</font> (files by checksum), "
                               "<font face='Mono'>jobs/</font> (each job's layout, linked to the store). The longest "
                               "unused files are removed when the size limit is reached; <i>Clear</i> empties it. "
                               "On Windows, choose a short folder (e.g. D:\\bbr) if file names are long."],
@@ -1173,9 +1174,9 @@ curl -X POST -H "X-BBR-Request: 1" \\
         ["A job is <i>on hold</i>", "Its .blend changed or is missing – see the status note and section 7.2."],
         ["The batch stopped with “disk almost full”", "Free space on the render drive (or lower the limit in "
                                                                "Settings) and press Start."],
-        ["Frames keep failing", "Open <i>Issues &amp; history</i> for the error, and the log in "
-                                "<font face='Mono'>logs/crashes/</font>. Memory problems: try <i>Restart Blender every "
-                                "N frames</i> or lower samples / resolution."],
+        ["Frames keep failing", "Open <i>Issues</i> for the error, and the log in "
+                                "<font face='Mono'>logs/crashes/</font>. Memory problems: try <i>Restart Blender</i> "
+                                "or lower samples / resolution."],
         ["Wrong Blender version used", "Check the reason in the Live tab; add the missing install under Settings or "
                                        "choose one in the job settings."],
         ["“Job folder missing” on start", "The render folder was moved or renamed: <i>File → Add existing job "
@@ -1186,7 +1187,7 @@ curl -X POST -H "X-BBR-Request: 1" \\
         ["Mac went to sleep", "Keep it plugged in; a closed MacBook lid without an external display still sleeps."],
         ["Status page does not open", "Check <i>Settings → Status page &amp; API</i>; the Messages tab says if the port is "
                                       "taken – choose another port (and enter it in the Blender add-on too)."],
-        ["Phone cannot reach the page", "Tick <i>Allow other devices…</i>, use the copied link (it contains the key), make "
+        ["Phone cannot reach the page", "Tick <i>Home network access</i>, use the copied link (it contains the key), make "
                                         "sure the phone is on the same Wi-Fi, and allow the app in the Mac's firewall."],
         ["Add-on: \u201cnot running\u201d", "Start the app; check that the port in the add-on's preferences matches the app."],
         ["A worker gets no frames", "The Machines tab says why: other Blender version, missing add-on, switched off, "

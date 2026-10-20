@@ -23,6 +23,8 @@ On first launch the app looks for Blender installs in `/Applications` (or Progra
 
 ## Using it
 
+Hover the mouse over any setting, button or column to see what it does.
+
 1. **Add .blend…** (⌘I), or drop files onto the list (dropping them onto a folder puts them in that folder). By default, the output goes into a folder called **`render` next to each .blend file** (`shots/shot_010.blend` → `shots/render/shot_010/`). You can choose a **custom folder** instead. A queue folder can also have its own render folder.
 2. Optional overrides: start/end frame, samples, resolution %. Everything else is taken from the .blend file as saved.
 3. **▶ Start.**
@@ -59,9 +61,9 @@ The keys that act on a row only work while the queue list has the focus, so typi
 
 **Blender version per file:** "Auto" reads the version from the .blend file's header. It uses the matching install, or the next newer one if there's no match. You can pick a specific install per job instead.
 
-**Retries:** if Blender crashes or errors on a frame, the frame is tried again, up to *Attempts per frame* times, with an optional *Wait before retry*. After the last attempt the frame is marked failed and the job continues with the next frame. A file that can't even load is retried the same number of times, then the job is marked failed and the batch moves on. *Frame timeout* kills a frame that takes longer than that limit, and it counts as a failed attempt.
+**Retries:** if Blender crashes or errors on a frame, the frame is tried again, up to *Attempts* times, with an optional *Retry delay*. After the last attempt the frame is marked failed and the job continues with the next frame. A file that can't even load is retried the same number of times, then the job is marked failed and the batch moves on. *Frame timeout* kills a frame that takes longer than that limit, and it counts as a failed attempt.
 
-**Restart Blender every N frames** (job setting, off by default): starts a fresh Blender process every N frames. Blender's memory can creep up over a long sequence; restarting avoids crashes from that, at the cost of loading the file again.
+**Restart Blender** (job setting, off by default): starts a fresh Blender process every N frames. Blender's memory can creep up over a long sequence; restarting avoids crashes from that, at the cost of loading the file again.
 
 **Safety checks:**
 - **Disk space:** if the render drive has less free space than the limit in Settings (default 5 GB), or Blender reports "disk full", the batch stops after the current frame and keeps everything rendered so far. No frame is marked as failed. Free some space and press Start.
@@ -73,9 +75,9 @@ The keys that act on a row only work while the queue list has the focus, so typi
 
 ## Status page & API
 
-While the app runs, it serves a **status page** that works in any browser: *Help → Open status page in browser*, or http://127.0.0.1:8642/. It shows the batch and per-job progress, the frame being rendered with Blender's remaining time, the last finished frame, the queue with its folders, and Blender's console. It also has Start / Stop after frame / Stop now buttons. It updates every two seconds.
+While the app runs, it serves a **status page** that works in any browser: *Help → Status page*, or http://127.0.0.1:8642/. It shows the batch and per-job progress, the frame being rendered with Blender's remaining time, the last finished frame, the queue with its folders, and Blender's console. It also has Start / Stop after frame / Stop now buttons. It updates every two seconds.
 
-**On your phone or another computer:** in *Settings → Status page & API*, tick *Allow other devices on my home network*. Then use *Copy link for other devices*. The link contains a key, so only devices that know it get in. Away from home the app is not reachable. For that, use a VPN such as Tailscale; don't open a port on your router.
+**On your phone or another computer:** in *Settings → Status page & API*, tick *Home network access*. Then use *Copy link*. The link contains a key, so only devices that know it get in. Away from home the app is not reachable. For that, use a VPN such as Tailscale; don't open a port on your router.
 
 **API:** the same server offers a JSON API (version 1) for other tools. Requests from the same computer need the header `X-BBR-Request: 1` for anything that changes something; other devices need `X-API-Key: <key>`.
 
@@ -100,8 +102,8 @@ Several computers can render the frames of one animation together, e.g. a Window
 
 **Setup:**
 1. On every computer, install the app, the Blender version(s) your files need, and the add-ons your scenes use (e.g. LensSim). Add-ons are not copied between machines.
-2. On the coordinator, open the **Machines** tab and tick *Share jobs with worker computers*. It shows a 6-digit pairing code. Each code works for one pairing and then changes. Every worker gets its own key; right-click a machine → *Unpair and remove* revokes it, and that computer has to pair again to come back. Allow incoming connections when the firewall asks.
-3. On each worker, switch **Mode** (top right) to **Worker**, press *Find on network* (or type the coordinator's address), enter the code and press *Pair*. Pairing is needed only once. After that, a worker connects only when you press **Connect** in its window. Tick *Connect automatically when the app starts* to have it connect by itself; **Disconnect** stops it (not while it's rendering).
+2. On the coordinator, open the **Machines** tab and tick *Share jobs with workers*. It shows a 6-digit pairing code. Each code works for one pairing and then changes. Every worker gets its own key; right-click a machine → *Unpair and remove* revokes it, and that computer has to pair again to come back. Allow incoming connections when the firewall asks.
+3. On each worker, switch **Mode** (top right) to **Worker**, press *Find* (or type the coordinator's address), enter the code and press *Pair*. Pairing is needed only once. After that, a worker connects only when you press **Connect** in its window. Tick *Connect on start* to have it connect by itself; **Disconnect** stops it (not while it's rendering).
 4. Press **Start** on the coordinator.
 
 **How it works:**
@@ -113,19 +115,19 @@ Several computers can render the frames of one animation together, e.g. a Window
   | Assets | textures, HDRIs, UDIM tiles, Alembic/USD, single VDBs, movies, fonts | once; kept on the worker by checksum and reused by every job that uses them |
   | Frame files | image sequences, VDB sequences, simulation/fluid caches | **Smart**: only the files a frame needs, shortly before it renders (the next frame's files load while the current one renders), deleted afterwards. **Full copy**: everything before the first frame |
 
-  *Transfer to other computers* (job settings) chooses Smart (default) or Full copy. Smart falls back to Full copy on its own when a file turns out to be missing: Blender checks every file it refers to after opening the job, and a "cannot read" message while rendering also triggers the fallback. Such a frame is never delivered or counted as failed.
+  *File transfer* (job settings) chooses Smart (default) or Full copy. Smart falls back to Full copy on its own when a file turns out to be missing: Blender checks every file it refers to after opening the job, and a "cannot read" message while rendering also triggers the fallback. Such a frame is never delivered or counted as failed.
 - **Checks.** Every file is checksummed on the way in both directions. A damaged download is fetched again; a damaged frame upload is sent again. The coordinator remembers checksums, so big files are only read again when their size or date changes. Files that don't shrink by at least 10 % aren't compressed for transfer.
 - **Version check.** Coordinator and workers must run the same app version. A worker with another version is refused with "update the worker to …" instead of failing halfway.
 - **Consistency check** (job setting, on by default). Before a computer joins a job, it renders a frame that's already done, and the coordinator compares the two images in Blender. Noise differences between CPU and GPU average out; a missing add-on effect, other colours or missing textures don't. Computers whose frame looks different are left out of that job, and the test frame is kept in `data/consistency/` to look at. Untick the check to use them anyway. The check runs again when the job copy or that computer's device setting changes.
 - **Is it worth it?** A computer doesn't get one of the last frames if the others would finish all remaining frames before it finishes that one, counting render time plus moving its frame files. This avoids a slow computer holding up the end of a job.
 - **Unbaked simulations** can come out differently on another computer, so such jobs stay on the coordinator. Bake them to share the job.
 - **Frames.** Workers render one frame at a time and keep Blender open in between, so faster machines simply do more frames. Each finished frame is uploaded right away, and the worker deletes its copy once the coordinator has confirmed it.
-- **Who gets frames.** Frames only go to workers with the same Blender version (major.minor) and the add-ons the file uses. Add-ons are detected from node groups, custom properties and render handlers. The Machines tab says why a worker is idle. If a job's add-ons don't affect the image, tick *Other computers don't need this job's add-ons* in its job settings.
+- **Who gets frames.** Frames only go to workers with the same Blender version (major.minor) and the add-ons the file uses. Add-ons are detected from node groups, custom properties and render handlers. The Machines tab says why a worker is idle. If a job's add-ons don't affect the image, tick *Ignore add-ons* in its job settings.
 - **Engines.** Cycles, EEVEE and Workbench work. Cycles uses each machine's own GPU settings (OptiX/CUDA, Metal).
-- **Device per computer** (job settings): for each computer choose *As saved in the file*, *GPU*, *CPU* or *Off*. Example: a scene with an NVIDIA-only add-on renders on the PC's GPU and on the Mac's CPU (or not at all on the Mac). A scene that needs lots of VRAM renders on the Mac's GPU and is switched off for the PC. *GPU* uses the GPU set in that computer's Blender preferences, or the first one it finds.
+- **Devices** (job settings): for each computer choose *From file*, *GPU*, *CPU* or *Off*. Example: a scene with an NVIDIA-only add-on renders on the PC's GPU and on the Mac's CPU (or not at all on the Mac). A scene that needs lots of VRAM renders on the Mac's GPU and is switched off for the PC. *GPU* uses the GPU set in that computer's Blender preferences, or the first one it finds.
 - **Stop after frame:** every machine delivers its current frame first. **Stop now** and **Cancel job:** every machine drops its frame, and nothing counts as failed.
 - **A worker vanishes** (sleep, Wi-Fi drop): after 45 s without a heartbeat, its frame goes back to the pool. **A worker crashes on a frame:** the failed attempt is counted against that machine, and the frame is preferably given to another one.
-- **Locked while rendering:** the mode switch, sharing and the worker's settings. On a worker, use *Pause after this frame* or *Stop now* instead.
+- **Locked while rendering:** the mode switch, sharing and the worker's settings. On a worker, use *Pause after frame* or *Stop now* instead.
 
 **Statistics:** the **Machines** tab shows, per machine:
 - state, current frame with samples and remaining time;
@@ -134,7 +136,7 @@ Several computers can render the frames of one animation together, e.g. a Window
 
 Above the table are the combined figures and the speed of all machines together (frames per hour). The **Live** tab shows frames per machine for the selected job. `frames.csv` has a *machine* column, and `report.xlsx` has a **Machines** sheet with charts. The worker window shows its own session, all-time and per-job statistics. The status page has a Machines section too.
 
-The worker keeps downloaded files in its app data folder (on Windows `%APPDATA%\BlenderBatchRenderer\worker_cache`), or in a folder you choose with *Change folder…* in the worker window. The oldest files are deleted when *keep up to … GB* is reached. Choose a short folder path (e.g. `D:\bbr`) if your file names are long, because Windows limits the length of paths.
+The worker keeps downloaded files in its app data folder (on Windows `%APPDATA%\BlenderBatchRenderer\worker_cache`), or in a folder you choose with *Folder…* in the worker window. The oldest files are deleted when *Limit* is reached. Choose a short folder path (e.g. `D:\bbr`) if your file names are long, because Windows limits the length of paths.
 
 Command line worker: `python -m bbr worker --code 123456` (finds the coordinator by itself) or `python -m bbr worker --server 192.168.1.20`.
 
@@ -169,7 +171,7 @@ The queue itself lives in `~/Library/Application Support/BlenderBatchRenderer/` 
 - **The preview MP4** uses the scene's fps and resolution. Failed frames show as black gaps. EXR sequences use the scene's view transform; PNG/JPG are shown as they are.
 - **Live progress:** Blender 5 no longer prints its progress lines in background mode. The render script therefore forwards Blender's render statistics (samples, remaining time, memory) to the app.
 - **Memory:** *Blender peak* is what Blender reports; *process peak* is the operating system's measurement of the Blender process. On Apple Silicon, GPU memory is shared with the system, so most of it shows up in the process figure.
-- **Unbaked simulations** (cloth, particles, rigid body …) can come out different when a job resumes mid-sequence. Bake them first; the optional *Check the file first* setting warns about this.
+- **Unbaked simulations** (cloth, particles, rigid body …) can come out different when a job resumes mid-sequence. Bake them first; the optional *Check file first* setting warns about this.
 - **Thumbnails** work for PNG/JPG/TIFF, not for EXR.
 
 ## Command line (no window)
