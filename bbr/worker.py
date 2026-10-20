@@ -32,7 +32,7 @@ from urllib.parse import urlparse, quote
 from . import __version__, PROTOCOL
 from .installs import BlenderInstall
 from .parse import parse_marker, parse_stats, fmt_bytes
-from .process import BlenderProcess
+from .process import BlenderProcess, hidden
 from .storage import app_data_dir, atomic_write_json, read_json
 
 try:
@@ -121,8 +121,10 @@ def list_addons(inst: BlenderInstall, timeout: float = 180) -> dict:
     """Enabled add-ons of one Blender install (with this computer's preferences)."""
     import subprocess
     try:
-        out = subprocess.run([inst.executable, "-b", "--python-exit-code", "2", "--python", ADDONS_SCRIPT],
-                             capture_output=True, text=True, timeout=timeout, errors="replace").stdout
+        out = subprocess.run([inst.executable, "-b", "-noaudio",
+                              "--python-exit-code", "2", "--python", ADDONS_SCRIPT],
+                             capture_output=True, text=True, timeout=timeout, errors="replace",
+                             **hidden()).stdout
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"error": str(e), "addons": {}}
     for line in out.splitlines():
@@ -161,6 +163,7 @@ class Worker:
         self._threads = []
         self._addon_cache = {}          # executable -> (mtime, result)
         self._full_jobs = set()         # (job id, version) that switched to Full copy
+        self._rechecked = False
         self._progress = None
         from .keepawake import KeepAwake
         self._keep = KeepAwake()
@@ -257,8 +260,26 @@ class Worker:
             pass
         self._wake.set()
 
+    def _load_addon_cache(self):
+        if self._addon_cache:
+            return
+        d = read_json(app_data_dir() / "addons_cache.json", {}) or {}
+        self._addon_cache = {exe: (v["mtime"], v["result"]) for exe, v in d.items()
+                             if isinstance(v, dict) and "mtime" in v and "result" in v}
+
+    def _save_addon_cache(self):
+        try:
+            atomic_write_json(app_data_dir() / "addons_cache.json",
+                              {exe: {"mtime": mt, "result": res} for exe, (mt, res) in self._addon_cache.items()})
+        except OSError:
+            pass
+
     def refresh_installs(self, force: bool = False) -> list:
+        """Blender installs with their enabled add-ons. Without force, the list from the last check is
+        used (asking Blender takes a few seconds per install); see _recheck_addons."""
+        self._load_addon_cache()
         out = []
+        changed = False
         for d in self.settings.installs:
             inst = BlenderInstall.from_dict(d)
             try:
@@ -268,15 +289,33 @@ class Worker:
             c = self._addon_cache.get(inst.executable)
             if force or not c or c[0] != mt:
                 self._console(f"Checking the add-ons of {inst.label} …")
-                c = (mt, list_addons(inst))
+                new = (mt, list_addons(inst))
+                changed = changed or (c is None or c[1].get("addons") != new[1].get("addons"))
+                c = new
                 self._addon_cache[inst.executable] = c
             res = c[1]
             out.append({"version": inst.version_short, "label": inst.label, "executable": inst.executable,
                         "addons": res.get("addons") or {}, "addons_error": res.get("error")})
-        self.installs_info = out
-        self.registered = False          # tell the coordinator again
+        self._save_addon_cache()
+        if out != self.installs_info:
+            self.installs_info = out
+            self.registered = False      # tell the coordinator again
         self.emit("worker", {})
         return out
+
+    def _recheck_addons(self):
+        """Once per session, after connecting: ask Blender again in the background (an add-on may have
+        been installed or enabled since), and tell the coordinator if anything changed."""
+        if self._rechecked:
+            return
+        self._rechecked = True
+
+        def run():
+            try:
+                self.refresh_installs(force=True)
+            except Exception:
+                pass
+        threading.Thread(target=run, name="bbr-addons", daemon=True).start()
 
     def status(self) -> dict:
         return {"running": self.running, "state": self.state, "note": self.note, "accepting": self.accepting,
@@ -332,7 +371,7 @@ class Worker:
 
     def _hello(self):
         if not self.installs_info:
-            self.refresh_installs()
+            self.refresh_installs()          # quick: uses the list from the last check if there is one
         info = machine_info()
         info.update({"name": self.name,
                      "installs": [{k: i[k] for k in ("version", "label", "addons")} for i in self.installs_info]})
@@ -343,6 +382,7 @@ class Worker:
         self.coordinator_name = d.get("coordinator") or ""
         self.registered = True
         self._console(f"Connected to {self.coordinator_name} ({self.settings.worker_server})")
+        self._recheck_addons()
 
     # ---- main loop ---------------------------------------------------------------
     def _main_loop(self):

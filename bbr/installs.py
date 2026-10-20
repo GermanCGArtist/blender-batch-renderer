@@ -56,7 +56,8 @@ def probe(path: str, timeout: float = 90) -> Optional[BlenderInstall]:
     if not exe:
         return None
     try:
-        out = subprocess.run([exe, "--version"], capture_output=True, text=True,
+        from .process import hidden
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, **hidden(),
                              timeout=timeout, errors="replace").stdout
     except (OSError, subprocess.SubprocessError):
         return None

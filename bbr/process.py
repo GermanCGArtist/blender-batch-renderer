@@ -18,6 +18,16 @@ except ImportError:  # memory sampling is optional
     psutil = None
 
 
+WINDOWS = sys.platform.startswith("win")
+CREATE_NO_WINDOW = 0x08000000
+
+
+def hidden() -> dict:
+    """subprocess arguments that keep Windows from opening a console window for a child process
+    (Blender is a console program; started from the app, each run would get its own window)."""
+    return {"creationflags": CREATE_NO_WINDOW} if WINDOWS else {}
+
+
 class BlenderProcess:
     def __init__(self, cmd: List[str], env: dict, log_path: str,
                  on_line: Callable[[str], None], cwd: Optional[str] = None):
@@ -41,7 +51,7 @@ class BlenderProcess:
         """Start, stream until exit, return exit code."""
         kwargs = {}
         if sys.platform.startswith("win"):
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW  # type: ignore[attr-defined]
         else:
             kwargs["start_new_session"] = True   # own process group -> clean kill
         with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
