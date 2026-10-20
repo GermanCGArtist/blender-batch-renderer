@@ -66,18 +66,15 @@ class WorkerEndpoints:
         self._lock = threading.Lock()
 
     # ---- auth -----------------------------------------------------------------
-    def key(self) -> str:
-        if not self.settings.worker_secret:
-            self.settings.worker_secret = secrets.token_urlsafe(24)
-            try:
-                self.settings.save()
-            except OSError:
-                pass
-        return self.settings.worker_secret
-
+    # Every worker gets its own key when it pairs. Only a hash of it is stored here, and
+    # "Forget machine" deletes it: that computer is locked out until it pairs again with a new code.
     def authorized(self, headers) -> bool:
         k = headers.get("X-BBR-Worker-Key") or ""
-        return bool(k) and secrets.compare_digest(k, self.key())
+        mid = (headers.get("X-BBR-Machine") or "").strip()
+        m = self.sched.machines.get(mid)
+        if not k or m is None or m.kind == "local" or not m.key_hash:
+            return False
+        return secrets.compare_digest(hashlib.sha256(k.encode()).hexdigest(), m.key_hash)
 
     def pair(self, body: dict) -> dict:
         if not self.settings.share_with_workers:
@@ -92,8 +89,25 @@ class WorkerEndpoints:
             if not code or not secrets.compare_digest(code, str(self.settings.pairing_code)):
                 self._pair_fail.append(now)
                 raise WorkerError(401, "wrong pairing code")
-        self.runner._msg("info", f"{body.get('name') or 'A computer'} is now paired as a worker")
-        return {"key": self.key(), "coordinator": self.sched.local.name, "app_version": __version__}
+        mid = str(body.get("id") or "")
+        if not re.match(r"^[\w-]{4,40}$", mid) or mid == "local":
+            raise WorkerError(400, "invalid machine id")
+        key = secrets.token_urlsafe(32)
+        name = str(body.get("name") or "").strip()[:60] or mid
+        m = self.sched.register({"id": mid, "name": name})
+        with self.sched.lock:
+            m.key_hash = hashlib.sha256(key.encode()).hexdigest()
+            m.last_seen = 0.0
+            m.state = "offline"
+        self.sched._persist()
+        # a pairing code works once: the next computer needs the new code shown in the Machines tab
+        self.settings.pairing_code = "".join(secrets.choice("0123456789") for _ in range(6))
+        try:
+            self.settings.save()
+        except OSError:
+            pass
+        self.runner._msg("info", f"{name} is now paired as a worker (the pairing code has changed for the next one)")
+        return {"key": key, "coordinator": self.sched.local.name, "app_version": __version__}
 
     # ---- dispatch -------------------------------------------------------------
     def handle(self, h, method: str, path: str, q: dict):
@@ -110,7 +124,8 @@ class WorkerEndpoints:
         if sub == "pair" and method == "POST":
             return h._json(200, self.pair(h._body()))
         if not self.authorized(h.headers):
-            raise WorkerError(401, "not paired with this coordinator (wrong or missing worker key)")
+            raise WorkerError(401, "not paired with this coordinator (removed there, or its key is wrong) – pair again "
+                                   "with the current pairing code")
         mid = (h.headers.get("X-BBR-Machine") or "").strip()
         if not re.match(r"^[\w-]{4,40}$", mid):
             raise WorkerError(400, "missing X-BBR-Machine header")

@@ -162,7 +162,7 @@ c.close()
 print("5) different app versions are refused with a clear message")
 c = Coordinator(coord_inst)
 req = urllib.request.Request(c.url + "/api/v1/worker/hello", data=b"{}", method="POST",
-                             headers={"X-BBR-Machine": "wold001", "X-BBR-Worker-Key": c.st.worker_secret or "x"})
+                             headers={"X-BBR-Machine": "wold001", "X-BBR-Worker-Key": "x"})
 try:
     urllib.request.urlopen(req, timeout=5)
     check(False, "old worker refused")

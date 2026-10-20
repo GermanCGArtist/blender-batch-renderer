@@ -100,7 +100,7 @@ Several computers can render the frames of one animation together, e.g. a Window
 
 **Setup:**
 1. On every computer, install the app, the Blender version(s) your files need, and the add-ons your scenes use (e.g. LensSim). Add-ons are not copied between machines.
-2. On the coordinator, open the **Machines** tab and tick *Share jobs with worker computers*. It shows a 6-digit pairing code. Allow incoming connections when the firewall asks.
+2. On the coordinator, open the **Machines** tab and tick *Share jobs with worker computers*. It shows a 6-digit pairing code. Each code works for one pairing and then changes. Every worker gets its own key; right-click a machine → *Unpair and remove* revokes it, and that computer has to pair again to come back. Allow incoming connections when the firewall asks.
 3. On each worker, switch **Mode** (top right) to **Worker**, press *Find on network* (or type the coordinator's address), enter the code and press *Pair*. Pairing is needed only once. After that, a worker connects only when you press **Connect** in its window. Tick *Connect automatically when the app starts* to have it connect by itself; **Disconnect** stops it (not while it's rendering).
 4. Press **Start** on the coordinator.
 

@@ -74,6 +74,7 @@ class Machine:
     note: str = ""
     live: dict = field(default_factory=dict)
     rate: float = 0.0                     # measured transfer speed to this machine (bytes/s), 0 = unknown
+    key_hash: str = ""                    # SHA-256 of this machine's own key (given when it paired)
     protocol: int = 0
     excluded_jobs: Dict[str, str] = field(default_factory=dict)   # job id -> reason (this batch)
     batch: dict = field(default_factory=lambda: {"frames": 0, "failed": 0, "render_s": 0.0, "bytes": 0})
@@ -85,6 +86,7 @@ class Machine:
 
     def to_public(self) -> dict:
         d = asdict(self)
+        d.pop("key_hash", None)
         d["online"] = self.online
         d["excluded_jobs"] = dict(self.excluded_jobs)
         for k in ("batch", "total"):
@@ -121,7 +123,7 @@ class Scheduler:
                 continue
             m = Machine(id=mid, name=str(d.get("name") or mid), os=d.get("os", ""), gpu=d.get("gpu", ""),
                         installs=list(d.get("installs") or []), enabled=d.get("enabled", True),
-                        state="offline", last_seen=0.0)
+                        state="offline", last_seen=0.0, key_hash=str(d.get("key_hash") or ""))
             m.total.update(d.get("total") or {})
             self.machines[mid] = m
         self._stop = threading.Event()
@@ -698,7 +700,7 @@ class Scheduler:
             with self.lock:
                 self.settings.machines = {
                     mid: {"name": m.name, "enabled": m.enabled, "total": dict(m.total), "os": m.os, "gpu": m.gpu,
-                          "installs": m.installs}
+                          "installs": m.installs, "key_hash": m.key_hash}
                     for mid, m in self.machines.items() if m.kind == "remote"}
             self.settings.save()
         except Exception:

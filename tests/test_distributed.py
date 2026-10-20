@@ -183,7 +183,28 @@ try:
 except urllib.error.HTTPError as e:
     check(e.code == 401, "worker endpoint without key refused")
 d = pair(c.url, c.st.pairing_code, "wgood1", "Good")
-check(d["key"] == c.st.worker_secret and d["key"] != c.st.api_key, "pairing hands out the worker key (not the API key)")
+check(d["key"] and d["key"] != c.st.api_key, "pairing hands out a worker key (not the API key)")
+from bbr.worker import _request  # noqa: E402
+H_ok = {"X-BBR-Worker-Key": d["key"], "X-BBR-Machine": "wgood1", "X-BBR-Protocol": "2"}
+check(_request(c.url, "POST", "/api/v1/worker/hello", {"name": "Good"}, H_ok)[0] == 200, "its own key works")
+check(_request(c.url, "POST", "/api/v1/worker/hello", {"name": "X"}, dict(H_ok, **{"X-BBR-Machine": "wother1"}))[0] == 401,
+      "the key does not work for another machine id")
+old_code = c.st.pairing_code
+d2 = pair(c.url, old_code, "wsecond1", "Second")
+check(c.st.pairing_code != old_code, "the pairing code changes after each pairing")
+try:
+    pair(c.url, old_code, "wthird1", "Third")
+    check(False, "a pairing code works only once")
+except CoordinatorError as e:
+    check(e.status == 401, "a pairing code works only once")
+c.r.scheduler.forget("wgood1")
+check(_request(c.url, "POST", "/api/v1/worker/hello", {"name": "Good"}, H_ok)[0] == 401,
+      "after 'Unpair and remove' the old key is refused")
+H2 = {"X-BBR-Worker-Key": d2["key"], "X-BBR-Machine": "wsecond1", "X-BBR-Protocol": "2"}
+check(_request(c.url, "POST", "/api/v1/worker/hello", {"name": "Second"}, H2)[0] == 200, "other workers keep working")
+c.r.scheduler.close(); c.r.scheduler = __import__("bbr.scheduler", fromlist=["Scheduler"]).Scheduler(c.q, c.st)
+check(c.r.scheduler.machines["wsecond1"].key_hash and "wgood1" not in c.r.scheduler.machines,
+      "keys survive a restart, removed ones stay removed")
 found = discover(timeout=1.0)
 check(any(f["url"].endswith(f":{c.port}") for f in found), f"coordinator found on the network ({found})")
 from bbr.workerapi import _safe_rel, WorkerError  # noqa: E402

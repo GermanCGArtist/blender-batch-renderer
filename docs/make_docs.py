@@ -1045,9 +1045,13 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "<b>Status page</b>: a Machines section with the same per-machine and combined figures.",
     ])
     s.append(H2("15.7  Security"))
-    s.append(P("Sharing makes the app reachable on the home network. Workers need the key they received when "
-               "pairing (the pairing code only works while sharing is on, and repeated wrong codes are blocked). "
-               "Without that key, nothing can be downloaded or uploaded. The status page still needs its own key for "
+    s.append(P("Sharing makes the app reachable on the home network. Every worker gets <b>its own key</b> when it "
+               "pairs; the coordinator stores only a fingerprint of it. A key works only together with that "
+               "worker's machine id. Each pairing code works <b>once</b> and changes after a successful pairing; it "
+               "only works while sharing is on, and repeated wrong codes are blocked. <i>Unpair and remove</i> "
+               "(right-click a machine in the Machines tab) revokes that worker's key at once – it has to pair "
+               "again with the current code to come back. Without a valid key, nothing can be downloaded or "
+               "uploaded. The status page still needs its own key for "
                "other devices. Use the app only on networks you trust; for working away from home use a VPN such "
                "as Tailscale."))
     s.append(H2("15.8  Where the files are"))

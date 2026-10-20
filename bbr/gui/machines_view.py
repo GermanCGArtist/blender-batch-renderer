@@ -47,7 +47,8 @@ class MachinesPanel(QWidget):
         self.code.setStyleSheet("font-size: 18px; font-weight: 600; letter-spacing: 3px;")
         self.code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         new_code = QPushButton("New code")
-        new_code.setToolTip("Already paired workers keep working; new ones need the new code")
+        new_code.setToolTip("Each code works for one pairing and changes afterwards. Already paired workers keep "
+                            "working; to lock one out, right-click it → Unpair and remove.")
         new_code.clicked.connect(self._new_code)
         self.addr = QLabel()
         self.addr.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -237,12 +238,12 @@ class MachinesPanel(QWidget):
             return
         m = self.sched.machines.get(mid)
         menu = QMenu(self)
-        a = menu.addAction("Forget this machine")
+        a = menu.addAction("Unpair and remove this machine")
         a.setEnabled(not self.runner.running)
         if menu.exec(self.table.viewport().mapToGlobal(pos)) is a:
-            if QMessageBox.question(self, "Forget machine",
-                                    f"Remove {m.name if m else mid} from the list? It shows up again when it "
-                                    "connects (it stays paired). Use “New code” and its “Forget pairing” to unpair."
+            if QMessageBox.question(self, "Unpair machine",
+                                    f"Remove {m.name if m else mid}? Its key stops working right away; to render "
+                                    "for this computer again it has to pair again with the current pairing code."
                                     ) == QMessageBox.StandardButton.Yes:
                 self.sched.forget(mid)
                 self.refresh()

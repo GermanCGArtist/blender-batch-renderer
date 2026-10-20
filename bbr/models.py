@@ -88,7 +88,6 @@ class AppSettings:
     render_locally: bool = True           # coordinator: this computer renders too
     machines: dict = field(default_factory=dict)          # coordinator: known workers (enabled, totals)
     pairing_code: str = ""                # coordinator: code a new worker enters once
-    worker_secret: str = ""               # coordinator: key handed to paired workers
     worker_id: str = ""                   # worker: our id at the coordinator
     worker_name: str = ""                 # worker: name shown on the coordinator ("" = computer name)
     worker_server: str = ""               # worker: coordinator address, e.g. http://192.168.1.20:8642
