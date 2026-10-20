@@ -73,20 +73,23 @@ class JobSettingsForm(QWidget):
             lab.setStyleSheet("font-weight: 600; margin-top: 6px;")
             form.addRow(lab)
 
-        self.root = QLineEdit()
+        # The row widget always belongs to this form (also when it is not shown). A widget without a
+        # parent here made Qt and Python both delete the text field, which crashed the app (v0.4).
+        self._root_row = QWidget(self)
+        row_l = QHBoxLayout(self._root_row)
+        row_l.setContentsMargins(0, 0, 0, 0)
+        self.root = QLineEdit(self._root_row)
         self.root.setPlaceholderText("next to each .blend")
-        browse = QPushButton("Browse…")
+        browse = QPushButton("Browse…", self._root_row)
         browse.clicked.connect(self._browse)
-        row_l = QHBoxLayout()
         row_l.addWidget(self.root, 1)
         row_l.addWidget(browse)
-        self._root_row = QWidget()
-        self._root_row.setLayout(row_l)
-        row_l.setContentsMargins(0, 0, 0, 0)
         section("Output")
         if show_root:
             row("Render folder", self._root_row,
                 "Where the job's folder is created. Empty: a folder called “render” next to each .blend file.")
+        else:
+            self._root_row.hide()
 
         self.blender = QComboBox()
         row("Blender", self.blender,

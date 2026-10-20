@@ -42,6 +42,15 @@ def main() -> int:
             return super().event(e)
 
     app = App(sys.argv)
+    # Python's garbage collector normally runs in whichever thread happens to allocate memory.
+    # With rendering on several computers many background threads are busy, and a Qt object
+    # collected there is deleted later on the main thread – which crashed the app in v0.4.
+    # So the collector runs only here, on the main thread, every two seconds.
+    import gc
+    gc.disable()
+    gc_timer = QTimer()
+    gc_timer.timeout.connect(lambda: gc.collect())
+    gc_timer.start(2000)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
     app.setOrganizationName("BlenderBatchRenderer")

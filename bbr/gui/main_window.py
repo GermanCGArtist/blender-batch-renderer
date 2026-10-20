@@ -975,6 +975,7 @@ class MainWindow(QMainWindow):
             j = self._sel()
             gid = self.selected_gid or (j.group if j else "")
         dlg = AddJobsDialog(files, self.settings, self._installs(), self, groups=self.queue.groups, group_id=gid or "")
+        dlg.finished.connect(dlg.deleteLater)
         if dlg.exec() != AddJobsDialog.DialogCode.Accepted:
             self.settings.save()
             return
@@ -1010,6 +1011,7 @@ class MainWindow(QMainWindow):
 
     def new_folder(self, move_job: Optional[Job] = None):
         dlg = FolderDialog(parent=self)
+        dlg.finished.connect(dlg.deleteLater)
         if dlg.exec() != FolderDialog.DialogCode.Accepted:
             return
         g = self.queue.add_group(dlg.name.text().strip() or "Folder", dlg.root.text().strip())
@@ -1024,6 +1026,7 @@ class MainWindow(QMainWindow):
         if not g:
             return
         dlg = FolderDialog(g["name"], g.get("render_root", ""), self, title="Folder settings")
+        dlg.finished.connect(dlg.deleteLater)
         if dlg.exec() == FolderDialog.DialogCode.Accepted:
             g["name"] = dlg.name.text().strip() or g["name"]
             g["render_root"] = dlg.root.text().strip()
@@ -1151,6 +1154,7 @@ class MainWindow(QMainWindow):
 
     def open_settings(self):
         dlg = SettingsDialog(self.settings, self, api=self.api)
+        dlg.finished.connect(dlg.deleteLater)
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             dlg.apply()
             self.console.setMaximumBlockCount(self.settings.console_lines)
@@ -1392,6 +1396,7 @@ class MainWindow(QMainWindow):
                 return "This computer is rendering for the coordinator"
             return ""
         dlg = UpdateDialog(self.settings, busy, self)
+        dlg.finished.connect(dlg.deleteLater)
         if dlg.exec() == 2:
             from .. import updater
             if busy():
