@@ -747,6 +747,8 @@ def build():
         ["This computer renders too", "on", "Machines tab: off = the coordinator only hands out frames."],
         ["Pairing code", "random", "Machines tab: 6 digits a new worker enters once; <i>New code</i> for new workers."],
         ["Worker: keep downloaded jobs up to", "50 GB", "Worker window: size of the cache of job copies (15.8)."],
+        ["Worker: connect automatically when the app starts", "off", "Otherwise press <i>Connect</i> in the "
+                                                                     "worker window (15.1)."],
         ["Worker: folder for downloaded files", "app data folder", "Worker window: <i>Change folder…</i> (15.8)."],
     ], [52, 34, 84]))
     s.append(H2("9.3  What the app changes in your file"))
@@ -941,7 +943,9 @@ curl -X POST -H "X-BBR-Request: 1" \\
         "allow incoming connections for the app.",
         "<b>On each worker</b>: switch the mode (top right of the window) to <b>Worker</b>. Press <i>Find on "
         "network</i> (or type the coordinator's address), enter the pairing code and press <i>Pair</i>. This is "
-        "needed only once; afterwards the worker connects by itself whenever both apps are running.",
+        "needed only once. Afterwards the worker connects only when you press <b>Connect</b> in its window – or by "
+        "itself when the app starts, if you tick <i>Connect automatically when the app starts</i>. "
+        "<b>Disconnect</b> stops it (not while it is rendering: pause or stop first).",
         "Press <b>Start</b> on the coordinator as usual. Workers that are online and switched on join in.",
     ])
     s.append(note("The mode switch, sharing and the worker's settings are <b>locked while something is rendering</b>. "

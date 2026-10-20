@@ -17,7 +17,7 @@ from ..worker import Worker, pair, normalize_server, CoordinatorError
 
 STATE_TEXT = {"not paired": "Not paired", "offline": "Coordinator not reachable", "paused": "Paused",
               "idle": "Waiting for work", "downloading": "Downloading the job", "loading": "Opening the file",
-              "rendering": "Rendering", "error": "Problem", "starting": "Starting…", "stopped": "Stopped"}
+              "rendering": "Rendering", "error": "Problem", "starting": "Connecting…", "stopped": "Not connected"}
 
 
 class WorkerView(QWidget):
@@ -27,6 +27,7 @@ class WorkerView(QWidget):
         self.settings = settings
         self.post = post
         self.worker: Worker = None
+        self._emit = post
         outer = QVBoxLayout(self)
 
         # ---- connection -----------------------------------------------------------
@@ -63,6 +64,17 @@ class WorkerView(QWidget):
         gl.addWidget(QLabel("This computer"), 2, 0)
         gl.addWidget(self.name, 2, 1, 1, 2)
         gl.addWidget(self.conn, 3, 0, 1, 3)
+        crow = QHBoxLayout()
+        self.b_connect = QPushButton("Connect")
+        self.b_connect.setToolTip("Connect to the coordinator and render frames for it")
+        self.b_connect.clicked.connect(self._connect_clicked)
+        self.autoconnect = QCheckBox("Connect automatically when the app starts")
+        self.autoconnect.setChecked(bool(getattr(settings, "worker_autoconnect", False)))
+        self.autoconnect.toggled.connect(self._autoconnect_toggled)
+        crow.addWidget(self.b_connect)
+        crow.addWidget(self.autoconnect)
+        crow.addStretch(1)
+        gl.addLayout(crow, 4, 0, 1, 3)
         outer.addWidget(g)
 
         # ---- control + now ---------------------------------------------------------
@@ -170,11 +182,33 @@ class WorkerView(QWidget):
         self._cache_text = ""
 
     # ---- lifecycle ----------------------------------------------------------------------
-    def start(self, emit):
+    def start(self, emit=None, connect: bool = True):
+        if emit is not None:
+            self._emit = emit
         if self.worker is None:
-            self.worker = Worker(self.settings, emit)
-        self.worker.start()
+            self.worker = Worker(self.settings, self._emit)
+        if connect and not self.worker.running:
+            self.worker.start()
         self.refresh()
+
+    @property
+    def connected(self) -> bool:
+        return bool(self.worker and self.worker.running)
+
+    def _connect_clicked(self):
+        if self.busy:
+            return
+        if self.connected:
+            self.stop(now=True)
+        else:
+            if not self.settings.worker_key:
+                QMessageBox.information(self, "Connect", "Pair with the coordinator first (address + pairing code).")
+                return
+            self.start(connect=True)
+
+    def _autoconnect_toggled(self, on: bool):
+        self.settings.worker_autoconnect = bool(on)
+        self.settings.save()
 
     def stop(self, now: bool = True):
         if self.worker:
@@ -243,6 +277,8 @@ class WorkerView(QWidget):
             self.worker.registered = False
             self.worker._wake.set()
         self.conn.setText(f"Paired with <b>{p.get('name')}</b>.")
+        if not self.connected:
+            self.start(connect=True)        # pairing means: I want to connect now
         self.refresh()
 
     def _forget(self):
@@ -342,6 +378,11 @@ class WorkerView(QWidget):
         self.accept.blockSignals(False)
         self.b_pause.setEnabled(rendering and st["accepting"])
         self.b_stop.setEnabled(rendering)
+        self.b_connect.setText("Disconnect" if self.connected else "Connect")
+        self.b_connect.setEnabled(not busy)
+        self.b_connect.setToolTip("Finish or stop the current frame first" if busy else
+                                  ("Stop working for the coordinator" if self.connected else
+                                   "Connect to the coordinator and render frames for it"))
         self.lock_note.setText("Settings are locked while a job is running – use Pause or Stop." if busy else "")
 
         if st["paired"]:
@@ -354,7 +395,8 @@ class WorkerView(QWidget):
             self.conn.setText("Not paired yet: find the coordinator (or type its address), enter its pairing code "
                               "and press Pair.")
         self.state.setText(STATE_TEXT.get(st["state"], st["state"]))
-        self.note.setText(st.get("note") or "")
+        self.note.setText(st.get("note") or ("Press Connect to render frames for the coordinator."
+                                             if not self.connected and st["paired"] else ""))
 
         cur = st["current"] or {}
         L = st["live"] or {}

@@ -1321,7 +1321,8 @@ class MainWindow(QMainWindow):
             if worker:
                 a.setEnabled(False)
         if worker:
-            self.worker_view.start(lambda k, p: self.bridge.event.emit(k, p))
+            self.worker_view.start(lambda k, p: self.bridge.event.emit(k, p),
+                                   connect=bool(self.settings.worker_autoconnect))
             self.setWindowTitle(f"{APP_NAME} – Worker")
         else:
             if not initial:

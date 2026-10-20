@@ -94,6 +94,7 @@ class AppSettings:
     worker_server: str = ""               # worker: coordinator address, e.g. http://192.168.1.20:8642
     worker_key: str = ""                  # worker: key received when pairing
     worker_accepting: bool = True         # worker: take frames from the coordinator
+    worker_autoconnect: bool = False      # worker: connect to the coordinator when the app starts
     worker_cache_gb: float = 50.0
     worker_cache_dir: str = ""            # worker: where downloaded job files live ("" = app data folder)         # worker: keep job packages up to this size
     worker_stats: dict = field(default_factory=dict)      # worker: lifetime statistics
