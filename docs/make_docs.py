@@ -749,8 +749,6 @@ def build():
         ["Check file first", "off", "Run the preflight check (chapter 12) before the first render of the job."],
         ["Ignore add-ons", "off", "Workers render the job even without the add-ons "
                                                                  "it seems to use (15.2)."],
-        ["File transfer", "Smart", "Smart: files once, frame files when needed; Full copy: "
-                                                 "everything before the first frame (15.3)."],
         ["Test frame", "on", "Test frame before a computer joins (15.4)."],
         ["Devices", "as saved in the file", "For each computer: GPU, CPU, or Off (never renders this "
                                                         "job). Cycles only (15.2)."],
@@ -1008,17 +1006,14 @@ curl -X POST -H "X-BBR-Request: 1" \\
         ["Assets", "textures, HDRIs, UDIM tiles, Alembic/USD, single VDBs, movies, fonts",
          "once; kept on the worker by checksum and reused by every job that uses them"],
         ["Frame files", "image sequences, VDB sequences, simulation and fluid caches on disk",
-         "<b>Smart</b>: only the files a frame needs, just before it renders (the next frame's files load while "
-         "the current one renders), deleted afterwards. <b>Full copy</b>: all before the first frame."],
+         "before the first frame; only the frames the job's range uses"],
     ], [26, 64, 80]))
     s += bullets([
-        "<b>File transfer</b> (job setting): <i>Smart</i> (default) or <i>Full copy</i>. Only frame "
-        "files the job's frame range actually uses are sent at all. For caches, the neighbouring frames are "
-        "included, because motion blur reads them.",
-        "<b>Automatic fallback.</b> After opening the job, the worker's Blender checks every file the scene refers "
-        "to. If something is missing, or Blender reports that it cannot read a file while rendering a frame, the "
-        "worker switches that job to Full copy and renders the frame again. Such a frame is never delivered or "
-        "counted as failed, and the coordinator shows a message.",
+        "Every file the job needs is sent before the first frame (frame files only for the job's frame range; "
+        "for caches also the neighbouring frames, because motion blur reads them). A mode that streams frame "
+        "files frame by frame (“Smart”) is built but switched off for now.",
+        "<b>File check.</b> After opening the job, the worker's Blender checks that every file the scene refers "
+        "to is there. If something is missing, it renders nothing and tells the coordinator why.",
         "<b>Checksums.</b> Every file is checked after transfer, in both directions. A damaged download is fetched "
         "again (three times at most); a damaged frame is sent again. The coordinator remembers checksums and reads a "
         "file again only when its size or date changes. A file that changes during the batch makes the coordinator "

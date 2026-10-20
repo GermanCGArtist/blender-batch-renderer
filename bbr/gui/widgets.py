@@ -142,17 +142,7 @@ class JobSettingsForm(QWidget):
         form.addRow("", self.preflight)
 
         section("Other computers")
-        self.transfer = QComboBox()
-        self.transfer.addItem("Smart", "smart")
-        self.transfer.addItem("Full copy", "full")
-        self.transfer.setItemData(0, "Textures, caches and libraries are sent once and reused; image and VDB "
-                                     "sequences frame by frame, just before each frame.", Qt.ItemDataRole.ToolTipRole)
-        self.transfer.setItemData(1, "Every file is sent before the first frame. Slower to start, nothing can be "
-                                     "missing later.", Qt.ItemDataRole.ToolTipRole)
-        row("File transfer", self.transfer,
-            "How workers get this job's files.\nSmart: textures, caches and libraries once (reused by other jobs), "
-            "image/VDB sequences frame by frame.\nFull copy: everything before the first frame.\nSmart switches "
-            "to Full copy by itself if a file turns out to be missing.")
+        # (File transfer "Smart" is switched off for now: workers always get every file up front.)
         self.consistency = QCheckBox("Test frame")
         self.consistency.setToolTip("Before a computer joins this job, it renders a frame that is already done and "
                                     "the two images are compared. Computers whose frame looks different "
@@ -252,7 +242,6 @@ class JobSettingsForm(QWidget):
         self.preflight.setChecked(bool(s.preflight))
         self.restart_every.setValue(int(s.restart_every or 0))
         self.ignore_addons.setChecked(bool(getattr(s, "ignore_addons", False)))
-        self.transfer.setCurrentIndex(1 if getattr(s, "transfer", "smart") == "full" else 0)
         self.consistency.setChecked(bool(getattr(s, "consistency_check", True)))
         self._devices = dict(getattr(s, "devices", None) or {})
         for name, cb in self._device_boxes.items():
@@ -269,7 +258,7 @@ class JobSettingsForm(QWidget):
             preflight=self.preflight.isChecked(), restart_every=self.restart_every.value(),
             ignore_addons=self.ignore_addons.isChecked(),
             devices=self._collect_devices(),
-            transfer=self.transfer.currentData() or "smart",
+            transfer="full",
             consistency_check=self.consistency.isChecked())
 
     def _collect_devices(self) -> dict:

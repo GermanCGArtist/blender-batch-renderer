@@ -195,11 +195,16 @@ def load_data(path, is_main):
         saved = None
     if saved and saved.get("fake_blend"):          # a copy written by save_as_mainfile below
         libs = []
+        main_dir = os.path.dirname(os.path.abspath(path))
         for p in saved["libraries"]:
             parent = None
             if "|" in p:
                 i, p = p.split("|", 1)
                 parent = libs[int(i)]
+                if p.startswith("//"):
+                    # like Blender 5: an indirect library's path is reported relative to the open file
+                    pdir = os.path.dirname(os.path.join(main_dir, parent.filepath[2:]))
+                    p = "//" + os.path.relpath(os.path.join(pdir, p[2:]), main_dir).replace(os.sep, "/")
             libs.append(NS(filepath=p, parent=parent))
         imgs = Images()
         for fp, packed, src in saved["images"]:

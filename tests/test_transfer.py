@@ -15,6 +15,9 @@ import bbr.hashing as hashing  # noqa: E402
 import bbr.worker as worker_mod  # noqa: E402
 import bbr.workerapi as wapi  # noqa: E402
 from bbr.package import build_package, load_manifest  # noqa: E402
+import bbr.scheduler as sched_mod  # noqa: E402
+
+sched_mod.SMART_ENABLED = True      # switched off in the app for now; the code is still tested here
 
 # ---- a project: one texture, an image sequence of 20 passes ------------------------------------
 proj = os.path.join(TMP, "proj")
@@ -67,7 +70,7 @@ c.close()
 # -------------------------------------------------------------------------------------------
 print("2) Smart transfer: texture once, one pass file per frame, reused by the next job")
 c = Coordinator(coord_inst)
-job = c.add(make_blend("comp2", "proj"))
+job = c.add(make_blend("comp2", "proj"), transfer="smart")
 w = make_worker(c, "PC", pc_inst)
 w.start()
 wait_for(lambda: w.registered, 20)
@@ -85,7 +88,7 @@ check(any((w.cache_dir / "store").rglob("*")), "texture kept in the worker's sto
 check(all(r.get("fetch_s") is not None for r in job.frames.values()), "fetch time recorded per frame")
 # a second job with the same texture
 requests.clear()
-job2 = c.add(make_blend("comp3", "proj"))
+job2 = c.add(make_blend("comp3", "proj"), transfer="smart")
 c.r.start()
 check(wait_for(lambda: job2.status == "done" and not c.r.running, 90), "second job done")
 check(not [r for r in requests if r.endswith("wood.png")], "texture not sent again (same checksum)")
@@ -118,7 +121,7 @@ def flaky_sha(path):
 
 
 worker_mod._sha256 = flaky_sha
-job3 = c.add(make_blend("comp4", "proj"))
+job3 = c.add(make_blend("comp4", "proj"), transfer="smart")
 c.r.start()
 check(wait_for(lambda: job3.status == "done" and not c.r.running, 90), f"job done ({job3.status})")
 cons = "\n".join(t for _s, t in w.console_tail)
@@ -145,7 +148,7 @@ worker_mod.Worker._ensure_file = gappy_ensure
 shutil = __import__("shutil")
 shutil.rmtree(w.cache_dir / "store", ignore_errors=True)
 shutil.rmtree(w.cache_dir / "jobs", ignore_errors=True)
-job4 = c.add(make_blend("comp5", "proj"))
+job4 = c.add(make_blend("comp5", "proj"), transfer="smart")
 requests.clear()
 c.r.start()
 check(wait_for(lambda: job4.status == "done" and not c.r.running, 90), f"job done ({job4.status})")

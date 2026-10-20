@@ -30,7 +30,7 @@ from .process import BlenderProcess
 from .storage import atomic_write_json, read_json
 
 # Raise when the job copy changes in a way workers depend on: older copies are then made again.
-PACKAGE_FORMAT = 2       # 2: indirectly linked libraries point next to their parent in libs/
+PACKAGE_FORMAT = 3       # 2: indirect libraries next to their parent in libs/; 3: library paths resolved robustly
 
 _manifests: "OrderedDict[str, dict]" = OrderedDict()
 _mlock = threading.Lock()

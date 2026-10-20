@@ -337,24 +337,41 @@ def used_addons(addons):
 
 
 # ---- input check (worker) ------------------------------------------------------
+def _candidates(rel, first_base):
+    """A relative path ("//…") can count from the file that links it or from the open file – Blender
+    is not consistent about which one it reports for libraries linked through other libraries."""
+    main_base = os.path.dirname(bpy.data.filepath)
+    out = []
+    for base in (first_base, main_base):
+        if base is not None:
+            p = os.path.normpath(os.path.join(base, rel))
+            if p not in out:
+                out.append(p)
+    return out
+
+
+def _pick(cands):
+    for p in cands:
+        if os.path.exists(p) or os.path.isdir(os.path.dirname(p)) and "<UDIM>" in p:
+            return p
+    return cands[0]
+
+
 def lib_path(lib):
-    """Absolute path of a linked library the way Blender finds it: a relative path ("//…") counts from
-    the folder of the file that links it – the parent library for indirect links, otherwise the open
-    file. (bpy.path.abspath(path, library=…) gets indirect links wrong.)"""
+    """Absolute path of a linked library (the first candidate that exists)."""
     p = lib.filepath
     if p.startswith("//"):
         parent = getattr(lib, "parent", None)
-        base = os.path.dirname(lib_path(parent)) if parent is not None else os.path.dirname(bpy.data.filepath)
-        return os.path.normpath(os.path.join(base, p[2:]))
+        base = os.path.dirname(lib_path(parent)) if parent is not None else None
+        return _pick(_candidates(p[2:], base))
     return os.path.normpath(p)
 
 
 def file_path(path, library=None):
-    """Absolute path of a file used by a data-block (image, cache …) – relative paths count from the
-    library the data-block comes from, or from the open file."""
+    """Absolute path of a file used by a data-block (image, cache …), which may come from a library."""
     if path.startswith("//"):
-        base = os.path.dirname(lib_path(library)) if library is not None else os.path.dirname(bpy.data.filepath)
-        return os.path.normpath(os.path.join(base, path[2:]))
+        base = os.path.dirname(lib_path(library)) if library is not None else None
+        return _pick(_candidates(path[2:], base))
     return os.path.normpath(path)
 
 

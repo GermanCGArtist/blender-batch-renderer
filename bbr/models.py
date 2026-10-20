@@ -57,7 +57,7 @@ class JobSettings:
     machines: List[str] = field(default_factory=list)   # machines allowed to render it ([] = all)
     ignore_addons: bool = False           # workers may render it without the add-ons it seems to use
     devices: dict = field(default_factory=dict)  # machine name -> "gpu" / "cpu" / "off" (missing = as in the file)
-    transfer: str = "smart"               # "smart": files once, frame files streamed / "full": everything up front
+    transfer: str = "full"                # "full": everything up front ("smart" – streaming – is switched off for now)
     consistency_check: bool = True        # a new computer first renders a frame that is compared with this one
 
     @classmethod

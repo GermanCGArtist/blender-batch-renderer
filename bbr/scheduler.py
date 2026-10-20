@@ -25,6 +25,7 @@ from .models import (Job, RUNNABLE, RENDERING, STOPPED, F_DONE, F_FAILED, F_PEND
 LEASE_SECONDS = 45            # a lease survives this long without a heartbeat
 OFFLINE_AFTER = 20            # a machine counts as offline after this many seconds of silence
 LOCAL_ID = "local"
+SMART_ENABLED = False         # Smart transfer (frame files streamed) is switched off for now; tests turn it on
 
 
 def addon_key(module: str) -> str:
@@ -371,7 +372,7 @@ class Scheduler:
                     "overrides": {"frame_start": s.frame_start, "frame_end": s.frame_end, "samples": s.samples,
                                   "resolution_pct": s.resolution_pct, "device": device_for(job, m.name)},
                     "frame_timeout_min": s.frame_timeout_min, "restart_every": s.restart_every,
-                    "abort_gen": self.abort_gen, "transfer": s.transfer if s.transfer in ("smart", "full") else "smart",
+                    "abort_gen": self.abort_gen, "transfer": (s.transfer if s.transfer in ("smart", "full") else "full") if SMART_ENABLED else "full",
                     "probe": probe is not None,
                 }}
             return {"lease": None, "reason": "; ".join(reasons) or "no frames left to hand out"}
@@ -426,7 +427,7 @@ class Scheduler:
         if t_m is None:
             return False                       # no experience yet: let it try
         pkg = job.package or {}
-        if job.settings.transfer != "full" and pkg.get("stream_bytes_per_frame"):
+        if SMART_ENABLED and job.settings.transfer != "full" and pkg.get("stream_bytes_per_frame"):
             t_m += pkg["stream_bytes_per_frame"] / (m.rate or 20e6)
         others = 0.0
         for x in self.machines.values():
