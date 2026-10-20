@@ -337,22 +337,37 @@ def used_addons(addons):
 
 
 # ---- input check (worker) ------------------------------------------------------
+def lib_path(lib):
+    """Absolute path of a linked library the way Blender finds it: a relative path ("//…") counts from
+    the folder of the file that links it – the parent library for indirect links, otherwise the open
+    file. (bpy.path.abspath(path, library=…) gets indirect links wrong.)"""
+    p = lib.filepath
+    if p.startswith("//"):
+        parent = getattr(lib, "parent", None)
+        base = os.path.dirname(lib_path(parent)) if parent is not None else os.path.dirname(bpy.data.filepath)
+        return os.path.normpath(os.path.join(base, p[2:]))
+    return os.path.normpath(p)
+
+
+def file_path(path, library=None):
+    """Absolute path of a file used by a data-block (image, cache …) – relative paths count from the
+    library the data-block comes from, or from the open file."""
+    if path.startswith("//"):
+        base = os.path.dirname(lib_path(library)) if library is not None else os.path.dirname(bpy.data.filepath)
+        return os.path.normpath(os.path.join(base, path[2:]))
+    return os.path.normpath(path)
+
+
 def missing_inputs(ignore=()):
     """External files the open scene refers to that are not there (sequence folders count, single
     frames of sequences are checked per frame by the app)."""
     ignore = set(ignore)
     out = []
 
-    def ab(path, lib):
-        try:
-            return os.path.normpath(bpy.path.abspath(path, library=lib))
-        except TypeError:
-            return os.path.normpath(bpy.path.abspath(path))
-
-    def check(path, lib, kind):
+    def check(path, lib, kind, resolved=None):
         if not path or path.startswith("<"):
             return
-        p = ab(path, lib)
+        p = resolved or file_path(path, lib)
         if os.path.basename(p) in ignore:
             return
         if kind == "dir":
@@ -367,7 +382,7 @@ def missing_inputs(ignore=()):
             out.append(p)
 
     for lib in bpy.data.libraries:
-        check(lib.filepath, getattr(lib, "parent", None), "file")
+        check(lib.filepath, None, "file", resolved=lib_path(lib))
     for img in bpy.data.images:
         if img.packed_file or not img.filepath or img.source not in ("FILE", "TILED", "SEQUENCE", "MOVIE"):
             continue

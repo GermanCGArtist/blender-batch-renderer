@@ -453,7 +453,6 @@ class MainWindow(QMainWindow):
         self.l_file_info.setWordWrap(True)
         self.l_file_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(self.l_file_info)
-        lay.addStretch(1)
         return w
 
     # ======================================================================

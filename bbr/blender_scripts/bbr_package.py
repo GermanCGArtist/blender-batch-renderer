@@ -39,14 +39,11 @@ def key_for(path):
 
 
 def abspath(path, lib=None):
-    try:
-        return os.path.normpath(bpy.path.abspath(path, library=lib))
-    except TypeError:
-        return os.path.normpath(bpy.path.abspath(path))
+    return C.file_path(path, lib)
 
 
 def lib_abspath(lib):
-    return abspath(lib.filepath, lib.parent) if getattr(lib, "parent", None) else abspath(lib.filepath)
+    return C.lib_path(lib)
 
 
 def frame_of(name):
