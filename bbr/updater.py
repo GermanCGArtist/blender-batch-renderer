@@ -31,7 +31,6 @@ from . import __version__
 REPO = "GermanCGArtist/blender-batch-renderer"
 CHANNELS = {"stable": "release", "alpha": "main"}
 API = os.environ.get("BBR_UPDATE_API", "https://api.github.com")
-RAW = os.environ.get("BBR_UPDATE_RAW", "https://raw.githubusercontent.com")
 CODELOAD = os.environ.get("BBR_UPDATE_CODELOAD", "https://codeload.github.com")
 INCLUDE = ("bbr/", "blender_addon/", "docs/Blender_Batch_Renderer_Documentation.pdf")
 
@@ -54,6 +53,8 @@ def shell_version() -> int:
 
 
 def _ctx():
+    if os.environ.get("SSL_CERT_FILE"):
+        return ssl.create_default_context(cafile=os.environ["SSL_CERT_FILE"])
     try:
         import certifi
         return ssl.create_default_context(cafile=certifi.where())
@@ -126,7 +127,12 @@ def check(channel: str) -> dict:
     sha = c.get("sha") or ""
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise UpdateError(f"no '{branch}' version found on GitHub")
-    init = _get(f"{RAW}/{REPO}/{sha}/bbr/__init__.py").decode("utf-8", "replace")
+    import base64
+    meta = _get_json(f"{API}/repos/{REPO}/contents/bbr/__init__.py?ref={sha}")
+    try:
+        init = base64.b64decode(meta.get("content") or "").decode("utf-8", "replace")
+    except ValueError:
+        raise UpdateError("unexpected answer from GitHub")
     m = re.search(r'__version__\s*=\s*"([^"]+)"', init)
     req = re.search(r"^SHELL_REQUIRED\s*=\s*(\d+)", init, re.M)
     commit = c.get("commit") or {}

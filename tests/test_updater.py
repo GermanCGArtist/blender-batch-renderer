@@ -85,9 +85,10 @@ class H(BaseHTTPRequestHandler):
         m = re.match(r"^/api/repos/[^/]+/[^/]+/git/trees/(\w+)\?recursive=1$", p)
         if m and m.group(1) in COMMITS:
             return self._send(json.dumps(COMMITS[m.group(1)][1]).encode())
-        m = re.match(r"^/raw/[^/]+/[^/]+/(\w+)/bbr/__init__.py$", p)
+        m = re.match(r"^/api/repos/[^/]+/[^/]+/contents/bbr/__init__.py\?ref=(\w+)$", p)
         if m and m.group(1) in COMMITS:
-            return self._send(COMMITS[m.group(1)][2].encode(), "text/plain")
+            import base64
+            return self._send(json.dumps({"content": base64.b64encode(COMMITS[m.group(1)][2].encode()).decode()}).encode())
         m = re.match(r"^/codeload/[^/]+/[^/]+/zip/(\w+)$", p)
         if m and m.group(1) in COMMITS:
             return self._send(COMMITS[m.group(1)][0], "application/zip")
@@ -98,7 +99,7 @@ class H(BaseHTTPRequestHandler):
 srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 base = f"http://127.0.0.1:{srv.server_address[1]}"
-os.environ.update(BBR_UPDATE_API=base + "/api", BBR_UPDATE_RAW=base + "/raw", BBR_UPDATE_CODELOAD=base + "/codeload")
+os.environ.update(BBR_UPDATE_API=base + "/api", BBR_UPDATE_CODELOAD=base + "/codeload")
 sys.path.insert(0, ROOT)
 import bbr_launcher  # noqa: E402
 from bbr import updater, __version__  # noqa: E402
