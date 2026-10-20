@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QSplitter, QTabWidget, QToo
                                QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QLabel, QProgressBar,
                                QPlainTextEdit, QToolBar, QFileDialog, QMessageBox, QHeaderView,
                                QAbstractItemView, QPushButton, QCheckBox, QMenu, QListWidget,
-                               QListWidgetItem, QStatusBar, QSizePolicy, QStackedWidget, QComboBox)
+                               QListWidgetItem, QStatusBar, QSizePolicy, QStackedWidget, QComboBox,
+                               QScrollArea, QFrame)
 
 from .. import APP_NAME, __version__
 from ..blendfile import version_str
@@ -418,7 +419,13 @@ class MainWindow(QMainWindow):
         w = QWidget()
         lay = QVBoxLayout(w)
         self.job_form = JobSettingsForm(self._installs, machines_provider=self._machine_names)
-        lay.addWidget(self.job_form)
+        # in a scroll area: when the panel is short, the settings scroll instead of being squeezed
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(self.job_form)
+        lay.addWidget(scroll, 1)
         row = QHBoxLayout()
         self.l_form_note = QLabel()
         self.l_form_note.setWordWrap(True)

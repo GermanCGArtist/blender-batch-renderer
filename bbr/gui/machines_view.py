@@ -93,6 +93,21 @@ class MachinesPanel(QWidget):
         self.table.customContextMenuRequested.connect(self._menu)
         self.table.itemChanged.connect(self._item_changed)
         lay.addWidget(self.table, 1)
+        brow = QHBoxLayout()
+        self.b_pause = QPushButton("Pause after frame")
+        self.b_pause.setToolTip("The selected computer finishes and delivers its current frame, then takes no "
+                                "more. Its other frames go to the other computers.")
+        self.b_stop = QPushButton("Stop now")
+        self.b_stop.setToolTip("The selected computer drops its frame right away and pauses; the frame goes to "
+                               "another computer. Nothing is counted as failed.")
+        self.b_resume = QPushButton("Resume")
+        self.b_resume.setToolTip("The selected computer takes frames again")
+        for b, cmd in ((self.b_pause, "pause"), (self.b_stop, "stop"), (self.b_resume, "resume")):
+            b.clicked.connect(lambda _=False, c=cmd: self._command_selected(c))
+            brow.addWidget(b)
+        brow.addStretch(1)
+        lay.addLayout(brow)
+        self.table.itemSelectionChanged.connect(self._update_buttons)
         hint = QLabel("Workers: open the app on the other computer, switch it to <b>Worker</b> mode (top right) "
                       "and enter the pairing code. Each worker needs the same Blender version as the job and "
                       "the add-ons the job uses (e.g. LensSim) – they are not copied. When your firewall asks, "
@@ -150,6 +165,7 @@ class MachinesPanel(QWidget):
                 self._fill_row(r, m, running)
             self.table.resizeColumnsToContents()
             self._fill_combined(pub, ms)
+            self._update_buttons()
         finally:
             self._filling = False
 
@@ -229,6 +245,27 @@ class MachinesPanel(QWidget):
             parts.append(fmt_bytes(comb["bytes"]))
         self.combined.setText("All machines: " + " · ".join(parts))
 
+    def _selected_mid(self):
+        rows = {i.row() for i in self.table.selectedIndexes()}
+        if len(rows) != 1:
+            return None
+        it = self.table.item(rows.pop(), 0)
+        mid = it.data(Qt.ItemDataRole.UserRole) if it else None
+        return None if mid == "local" else mid
+
+    def _update_buttons(self):
+        mid = self._selected_mid()
+        m = self.sched.machines.get(mid) if mid else None
+        ok = bool(m and m.online)
+        for b in (self.b_pause, self.b_stop, self.b_resume):
+            b.setEnabled(ok)
+
+    def _command_selected(self, cmd):
+        mid = self._selected_mid()
+        if mid:
+            self.sched.command(mid, cmd)
+            self.refresh()
+
     def _item_changed(self, it):
         if self._filling or it.column() != 0:
             return
@@ -250,9 +287,18 @@ class MachinesPanel(QWidget):
             return
         m = self.sched.machines.get(mid)
         menu = QMenu(self)
+        acts = {}
+        for text, cmd in (("Pause after frame", "pause"), ("Stop now", "stop"), ("Resume", "resume")):
+            acts[menu.addAction(text)] = cmd
+        menu.addSeparator()
         a = menu.addAction("Unpair and remove this machine")
         a.setEnabled(not self.runner.running)
-        if menu.exec(self.table.viewport().mapToGlobal(pos)) is a:
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen in acts:
+            self.sched.command(mid, acts[chosen])
+            self.refresh()
+            return
+        if chosen is a:
             if QMessageBox.question(self, "Unpair machine",
                                     f"Remove {m.name if m else mid}? Its key stops working right away; to render "
                                     "for this computer again it has to pair again with the current pairing code."

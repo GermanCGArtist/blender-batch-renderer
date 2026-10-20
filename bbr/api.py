@@ -27,6 +27,7 @@ API (all JSON; v1)
   POST   /api/v1/queue/open                {"path": "/path/x.bbrqueue"}  (window only)
   GET    /api/v1/machines                  computers taking part (per machine + combined statistics)
   POST   /api/v1/machines/<id>/enabled     {"enabled": true|false}
+  POST   /api/v1/machines/<id>/command     {"command": "pause" | "stop" | "resume"}
   DELETE /api/v1/machines/<id>             forget a worker
   /api/v1/worker/...                       used by worker machines, see workerapi.py
   GET    /                                 status page for a browser
@@ -158,6 +159,7 @@ def _make_handler(server: ApiServer):
         ("GET", r"/api/v1/machines", lambda m, q, b: ctl.machines()),
         ("POST", r"/api/v1/machines/([\w-]+)/enabled", lambda m, q, b: ctl.set_machine_enabled(m.group(1), bool(b.get("enabled")))),
         ("DELETE", r"/api/v1/machines/([\w-]+)", lambda m, q, b: ctl.forget_machine(m.group(1))),
+        ("POST", r"/api/v1/machines/([\w-]+)/command", lambda m, q, b: ctl.machine_command(m.group(1), str(b.get("command", "")))),
         ("POST", r"/api/v1/queue/open", lambda m, q, b: ctl.open_queue(str(b.get("path", "")))),
     ]
     compiled = [(meth, re.compile("^" + pat + "/?$"), fn) for meth, pat, fn in routes]

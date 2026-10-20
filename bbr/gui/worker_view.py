@@ -93,9 +93,10 @@ class WorkerView(QWidget):
         self.accept.toggled.connect(self._accept_toggled)
         self.b_pause = QPushButton("Pause after frame")
         self.b_pause.setToolTip("Finish and deliver the current frame, then take no more frames")
-        self.b_pause.clicked.connect(lambda: self.worker and self.worker.set_accepting(False))
+        self.b_pause.clicked.connect(self._pause_resume)
         self.b_stop = QPushButton("■  Stop now")
-        self.b_stop.setToolTip("Drop the frame being rendered – the coordinator gives it to another machine")
+        self.b_stop.setToolTip("Drop the frame being rendered right away and pause – the coordinator gives it "
+                               "to another computer. Resume to take frames again.")
         self.b_stop.clicked.connect(self._stop_now)
         self.lock_note = QLabel()
         self.lock_note.setStyleSheet("color: gray;")
@@ -320,6 +321,12 @@ class WorkerView(QWidget):
             self.settings.save()
         self.refresh()
 
+    def _pause_resume(self):
+        if not self.worker:
+            return
+        self.worker.set_accepting(not self.worker.accepting)
+        self.refresh()
+
     def _stop_now(self):
         if self.worker:
             self.worker.stop_now()
@@ -391,7 +398,15 @@ class WorkerView(QWidget):
         self.accept.blockSignals(True)
         self.accept.setChecked(st["accepting"])
         self.accept.blockSignals(False)
-        self.b_pause.setEnabled(rendering and st["accepting"])
+        if st["accepting"]:
+            self.b_pause.setText("Pause after frame")
+            self.b_pause.setToolTip("Finish and deliver the current frame, then take no more frames – "
+                                    "the coordinator gives the rest to other computers")
+            self.b_pause.setEnabled(rendering)
+        else:
+            self.b_pause.setText("Resume")
+            self.b_pause.setToolTip("Take frames from the coordinator again")
+            self.b_pause.setEnabled(self.connected)
         self.b_stop.setEnabled(rendering)
         self.b_connect.setText("Disconnect" if self.connected else "Connect")
         self.b_connect.setEnabled(not busy)

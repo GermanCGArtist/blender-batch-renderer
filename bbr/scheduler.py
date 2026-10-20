@@ -110,6 +110,7 @@ class Scheduler:
         self.request_package: Optional[Callable[[Job], None]] = None   # runner builds packages
         self.on_job_complete: Optional[Callable[[Job], None]] = None   # runner finalizes jobs
         self.local_busy_job: Optional[str] = None
+        self.commands: Dict[str, str] = {}       # machine id -> "pause" / "stop" / "resume" (next heartbeat)
         self.probes: Dict[tuple, dict] = {}       # (job id, machine id) -> {"frame", "ref", "started", "state"}
         self.on_probe_uploaded: Optional[Callable] = None    # runner compares the images
         self._pkg_ok: Dict[str, tuple] = {}
@@ -191,11 +192,31 @@ class Scheduler:
             for l in mine:
                 l.expires = now + LEASE_SECONDS
             return {
+                "command": self.commands.pop(mid, None),
                 "abort_gen": self.abort_gen,
                 "abort_jobs": [jid for jid in self.aborted_jobs],
                 "stop_after_frame": self.draining or not self.batch_running,
                 "leases": [{"job_id": l.job_id, "frame": l.frame, "token": l.token} for l in mine],
             }
+
+    def command(self, mid: str, cmd: str) -> bool:
+        """Ask a worker to 'pause' (finish its frame, then take no more), 'stop' (drop its frame at once –
+        it goes to another computer) or 'resume'. Delivered with its next heartbeat (a few seconds)."""
+        if cmd not in ("pause", "stop", "resume"):
+            raise ValueError(cmd)
+        with self.lock:
+            m = self.machines.get(mid)
+            if m is None or m.kind == "local":
+                return False
+            self.commands[mid] = cmd
+            if cmd == "stop":
+                # hand its frames out again right away; a frame it still delivers is accepted if nobody
+                # else finished it first
+                for k in [k for k, l in self.leases.items() if l.machine_id == mid]:
+                    del self.leases[k]
+            m.note = {"pause": "pausing after this frame", "stop": "stopping", "resume": "resuming"}[cmd]
+        self.emit("machines", {})
+        return True
 
     def local_live(self, live: dict, state: str):
         with self.lock:

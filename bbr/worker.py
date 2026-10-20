@@ -43,7 +43,7 @@ except ImportError:
 SCRIPTS = Path(__file__).resolve().parent / "blender_scripts"
 RENDER_SCRIPT = str(SCRIPTS / "bbr_render.py")
 ADDONS_SCRIPT = str(SCRIPTS / "bbr_addons.py")
-HEARTBEAT_S = 5.0
+HEARTBEAT_S = 3.0
 LOAD_FAILS_BEFORE_GIVING_UP = 2
 CRASHES_BEFORE_GIVING_UP = 3
 
@@ -164,6 +164,7 @@ class Worker:
         self._addon_cache = {}          # executable -> (mtime, result)
         self._full_jobs = set()         # (job id, version) that switched to Full copy
         self._rechecked = False
+        self._pause_note = ""
         self._progress = None
         from .keepawake import KeepAwake
         self._keep = KeepAwake()
@@ -232,6 +233,8 @@ class Worker:
 
     def set_accepting(self, on: bool):
         """Off = finish the current frame (and its upload), then pause."""
+        if on:
+            self._pause_note = ""
         self.accepting = bool(on)
         self.settings.worker_accepting = self.accepting
         try:
@@ -395,7 +398,7 @@ class Worker:
                 if not self.registered:
                     self._hello()
                 if not self.accepting:
-                    self._set_state("paused", "not accepting jobs")
+                    self._set_state("paused", self._pause_note or "not accepting jobs – tick Accept jobs to continue")
                     self._sleep(2)
                     continue
                 self._stop_after_frame = False
@@ -443,6 +446,18 @@ class Worker:
             if d.get("register"):
                 self.registered = False
                 continue
+            cmd = d.get("command")
+            if cmd == "pause":
+                self._console("The coordinator paused this computer – finishing the current frame")
+                self._pause_note = "paused from the coordinator"
+                self.set_accepting(False)
+            elif cmd == "stop":
+                self._console("The coordinator stopped this computer – the frame goes to another computer")
+                self._pause_note = "stopped from the coordinator"
+                self.stop_now()
+            elif cmd == "resume":
+                self._console("The coordinator resumed this computer")
+                self.set_accepting(True)
             cur = self.current
             gen = d.get("abort_gen")
             if self._abort_gen is None:

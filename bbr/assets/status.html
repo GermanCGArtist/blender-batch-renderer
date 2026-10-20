@@ -187,8 +187,15 @@ function renderMachines(M) {
       <span class="muted"> ${esc(st)}${m.enabled ? "" : " · switched off"}${m.gpu ? " · " + esc(m.gpu) : ""}</span>
       <div class="meta">${now}</div></div>
       <div class="right">${b.frames} frames${b.avg_frame_s ? " · " + fmt(b.avg_frame_s) : ""}${b.failed ? " · " + b.failed + " failed" : ""}
-      <br><span class="muted">all time ${t.frames}</span></div></div>`;
+      <br><span class="muted">all time ${t.frames}</span>
+      ${m.kind !== "local" && m.online ? `<br><a href="#" data-cmd="pause" data-mid="${m.id}">pause</a> ·
+        <a href="#" data-cmd="stop" data-mid="${m.id}">stop now</a> ·
+        <a href="#" data-cmd="resume" data-mid="${m.id}">resume</a>` : ""}</div></div>`;
   }).join("");
+  for (const a of document.querySelectorAll("[data-cmd]"))
+    a.onclick = ev => { ev.preventDefault();
+      if (a.dataset.cmd !== "stop" || confirm("Stop now? Its frame goes to another computer."))
+        control(`/api/v1/machines/${a.dataset.mid}/command`, {command: a.dataset.cmd}); };
 }
 
 function renderQueue(q) {

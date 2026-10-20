@@ -1046,6 +1046,10 @@ curl -X POST -H "X-BBR-Request: 1" \\
         ["Situation", "What happens"],
         ["Stop after frame", "Every machine finishes and delivers the frame it is working on, then the batch stops."],
         ["Stop now / Cancel job", "Every machine drops its frame at once; nothing is counted as failed."],
+        ["Pausing one computer", "<b>Pause after frame</b> (it delivers its frame, then takes no more), <b>Stop now</b> "
+                                 "(it drops its frame, which goes to another computer; nothing counts as failed) "
+                                 "and <b>Resume</b> – in the worker window, in the Machines tab (select or "
+                                 "right-click the computer) or on the status page. The others carry on with the job."],
         ["A worker crashes on a frame", "The frame counts one failed attempt (with the machine's name) and goes "
                                         "preferably to another machine. A worker that keeps crashing on a job or "
                                         "cannot open it is taken off that job for the rest of the batch."],

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, 
                                QPushButton, QDialogButtonBox, QGroupBox, QCheckBox, QSpinBox, QDoubleSpinBox, QLabel,
                                QFileDialog, QMessageBox, QHeaderView, QAbstractItemView, QFormLayout,
                                QListWidget, QApplication, QLineEdit, QComboBox, QRadioButton, QTabWidget,
-                               QWidget, QButtonGroup)
+                               QWidget, QButtonGroup, QScrollArea, QFrame)
 
 from ..installs import BlenderInstall, probe, scan
 from ..models import AppSettings, JobSettings
@@ -61,9 +61,12 @@ class SettingsDialog(QDialog):
         g2l = QVBoxLayout(g2)
         self.defaults = JobSettingsForm(lambda: self.installs, show_root=True, show_overrides=False)
         self.defaults.set_settings(JobSettings.from_dict(settings.defaults))
-        g2l.addWidget(self.defaults)
-        lay.addWidget(g2)
-        lay.addStretch(1)
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.Shape.NoFrame)
+        sc.setWidget(self.defaults)
+        g2l.addWidget(sc)
+        lay.addWidget(g2, 1)
 
         lay = page("App")
         g3 = QGroupBox("App")

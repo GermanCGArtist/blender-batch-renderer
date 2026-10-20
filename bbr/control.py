@@ -104,6 +104,14 @@ class Controller:
         self._changed()
         return self.machines()
 
+    def machine_command(self, mid: str, cmd: str) -> dict:
+        if cmd not in ("pause", "stop", "resume"):
+            raise ApiError(400, "command must be 'pause', 'stop' or 'resume'")
+        if not self.runner.scheduler.command(mid, cmd):
+            raise ApiError(404, f"no worker with id {mid}")
+        self._changed()
+        return self.machines()
+
     def forget_machine(self, mid: str) -> dict:
         if mid == "local":
             raise ApiError(400, "this computer cannot be removed")

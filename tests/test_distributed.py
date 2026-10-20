@@ -394,6 +394,41 @@ check(c.r.scheduler.compatible(job2, m) == "switched off for this job", "reason 
 w.stop()
 c.close()
 
+# ---------------------------------------------------------------------------------
+print("11) pausing / stopping a worker from the coordinator: its work goes to the other computers")
+c = Coordinator(fake_exe("blender_coord11", FAKE_ADDONS="lens_sim:LensSim:1.2.0", FAKE_FRAME_TIME="0.3"),
+                render_locally=True)
+job = c.add(make_blend("handover", "proj"), frame_start=1, frame_end=90)
+pcw = make_worker(c, "Busy PC", fake_exe("blender_busy", FAKE_ADDONS="lens_sim:LensSim:1.2.0", FAKE_FRAME_TIME="1.0"))
+pcw.start()
+wait_for(lambda: pcw.registered, 20)
+c.r.start()
+S = c.r.scheduler
+mid = pcw.settings.worker_id
+check(wait_for(lambda: pcw.state == "rendering", 60), "the PC renders")
+f_now = pcw.live.get("frame")
+S.command(mid, "pause")
+check(wait_for(lambda: pcw.current is None and not pcw.accepting, 30), "pause: the PC finishes its frame and stops")
+check(wait_for(lambda: job.frames.get(str(f_now), {}).get("machine") == "Busy PC", 20),
+      f"the frame it was rendering was delivered (frame {f_now})")
+done_pc = sum(1 for r in job.frames.values() if r.get("machine") == "Busy PC")
+time.sleep(4)
+check(sum(1 for r in job.frames.values() if r.get("machine") == "Busy PC") == done_pc, "no new frames while paused")
+check("paused" in pcw.state, f"the PC shows it is paused ({pcw.state}: {pcw.note})")
+S.command(mid, "resume")
+check(wait_for(lambda: pcw.state == "rendering", 30), f"resume: the PC renders again ({pcw.state}: {pcw.note}, {pcw.accepting})")
+f_drop = None
+wait_for(lambda: pcw.live.get("frame") is not None, 10)
+f_drop = pcw.live.get("frame")
+S.command(mid, "stop")
+check(wait_for(lambda: pcw.current is None, 20), "stop now: the PC drops its frame at once")
+check(wait_for(lambda: job.status == "done" and not c.r.running, 120), f"the job is finished by the Mac ({job.status})")
+rec = job.frames.get(str(f_drop), {})
+check(rec.get("status") == "done" and rec.get("machine") != "Busy PC" and not rec.get("failed_on"),
+      f"the dropped frame {f_drop} was rendered by the Mac, nothing counted as failed")
+pcw.stop()
+c.close()
+
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 if failures:

@@ -164,9 +164,11 @@ class JobSettingsForm(QWidget):
                                       "look different.")
         form.addRow("", self.ignore_addons)
         if machines_provider is not None:
-            self.devices_box = QWidget()
+            self.devices_box = QWidget(self)
             self.devices_lay = QFormLayout(self.devices_box)
             self.devices_lay.setContentsMargins(0, 0, 0, 0)
+            self.devices_lay.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            self.devices_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
             row("Devices", self.devices_box,
                 "Per computer: render on the GPU or CPU, or not at all (Off). Cycles only.\nGPU uses the GPU chosen "
                 "in that computer's Blender preferences, or the first one found.")
