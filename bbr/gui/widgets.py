@@ -163,15 +163,14 @@ class JobSettingsForm(QWidget):
                                       "Only for add-ons that don't change the image – otherwise their frames "
                                       "look different.")
         form.addRow("", self.ignore_addons)
+        self._form = form
+        self._device_rows = []          # (label, combo) rows at the end of the form, one per computer
         if machines_provider is not None:
-            self.devices_box = QWidget(self)
-            self.devices_lay = QFormLayout(self.devices_box)
-            self.devices_lay.setContentsMargins(0, 0, 0, 0)
-            self.devices_lay.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-            self.devices_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-            row("Devices", self.devices_box,
-                "Per computer: render on the GPU or CPU, or not at all (Off). Cycles only.\nGPU uses the GPU chosen "
-                "in that computer's Blender preferences, or the first one found.")
+            # one normal form row per computer (a form nested in a row was squeezed on macOS)
+            lab = QLabel("Devices")
+            lab.setStyleSheet("font-weight: 600; margin-top: 6px;")
+            lab.setToolTip(self.DEVICES_TIP)
+            form.addRow(lab)
             self.reload_machines()
         self.reload_installs()
 
@@ -196,23 +195,33 @@ class JobSettingsForm(QWidget):
 
     DEVICE_CHOICES = (("From file", ""), ("GPU", "gpu"), ("CPU", "cpu"), ("Off", "off"))
 
+    DEVICES_TIP = ("Per computer: render on the GPU or CPU, or not at all (Off). Cycles only.\nGPU uses the GPU "
+                   "chosen in that computer's Blender preferences, or the first one found.")
+
     def reload_machines(self, keep_choices: bool = True):
         if self.machines_provider is None:
             return
+        machines = list(self.machines_provider())
         if keep_choices:
             self._devices.update(self._read_devices())
-        for _ in range(int(self.devices_lay.rowCount())):
-            self.devices_lay.removeRow(0)
+        if [n for n, _ in machines] == list(self._device_boxes) and keep_choices:
+            return                      # same computers: keep the rows (no flicker, no re-layout)
+        for _lab, cb in self._device_rows:
+            self._form.removeRow(cb)
+        self._device_rows = []
         self._device_boxes = {}
-        for name, desc in self.machines_provider():
+        for name, desc in machines:
             cb = QComboBox()
             for text, val in self.DEVICE_CHOICES:
                 cb.addItem(text, val)
             i = cb.findData(self._devices.get(name, ""))
             cb.setCurrentIndex(max(0, i))
-            if desc:
-                cb.setToolTip(desc)
-            self.devices_lay.addRow(name, cb)
+            tip = (f"{name}: {desc}\n" if desc else "") + self.DEVICES_TIP
+            cb.setToolTip(tip)
+            lab = QLabel(name)
+            lab.setToolTip(tip)
+            self._form.addRow(lab, cb)
+            self._device_rows.append((lab, cb))
             self._device_boxes[name] = cb
 
     def _read_devices(self) -> dict:

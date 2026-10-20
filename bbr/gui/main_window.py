@@ -244,6 +244,8 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         self.batch_label = QLabel()
         self.batch_label.setTextFormat(Qt.TextFormat.RichText)
+        self.batch_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.batch_label.setMinimumWidth(200)
         self.batch_bar = QProgressBar()
         self.batch_bar.setMaximumWidth(380)
         self.batch_bar.setFormat("batch %p%")
@@ -278,7 +280,7 @@ class MainWindow(QMainWindow):
 
         # ---- right side tabs -------------------------------------------------
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_live_tab(), "Live")
+        self.tabs.addTab(self._scrolled(self._build_live_tab()), "Live")
         self.tabs.addTab(self._build_settings_tab(), "Job settings")
         self.issues = QPlainTextEdit()
         self.issues.setReadOnly(True)
@@ -288,7 +290,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabToolTip(2, "Problems, failed frames and all Blender runs of the selected job")
         self.machines_panel = MachinesPanel(self.runner, self.settings, self.api)
         self.machines_panel.settings_changed.connect(self._start_api)
-        self.tabs.addTab(self.machines_panel, "Machines")
+        self.tabs.addTab(self._scrolled(self.machines_panel), "Machines")
         self.tabs.setTabToolTip(3, "Computers that render this queue, with statistics")
         hsplit.addWidget(self.tabs)
         hsplit.setStretchFactor(0, 2)
@@ -333,9 +335,20 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.addWidget(central)
         self.worker_view = WorkerView(self.settings, lambda k, p: self.bridge.event.emit(k, p))
-        self.stack.addWidget(self.worker_view)
+        self.stack.addWidget(self._scrolled(self.worker_view))
         self.setCentralWidget(self.stack)
         self.setStatusBar(QStatusBar())
+
+    @staticmethod
+    def _scrolled(w):
+        """Put a page into a scroll area: when its content grows (longer texts, more computers), the page
+        scrolls instead of making the whole window taller."""
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.Shape.NoFrame)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        sa.setWidget(w)
+        return sa
 
     def _build_live_tab(self):
         w = QWidget()
@@ -698,7 +711,7 @@ class MainWindow(QMainWindow):
             self.worker_view.refresh()
             self._update_mode_lock()
             return
-        if self.tabs.currentWidget() is self.machines_panel:
+        if self.tabs.currentIndex() == 3:
             self.machines_panel.refresh()
         self._update_mode_lock()
         self._refresh_table()
@@ -932,7 +945,7 @@ class MainWindow(QMainWindow):
             if names != getattr(self, "_machine_names_shown", None):
                 self._machine_names_shown = names
                 self.job_form.reload_machines(keep_choices=True)
-            if self.tabs.currentWidget() is self.machines_panel and time.time() - self._machines_last > 0.5:
+            if self.tabs.currentIndex() == 3 and time.time() - self._machines_last > 0.5:
                 self._machines_last = time.time()
                 self.machines_panel.refresh()
             return
