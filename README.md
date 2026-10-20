@@ -83,6 +83,45 @@ The keys that act on a row only work while the queue list has the focus, so typi
 
 **Keep awake:** while a batch runs, the computer is kept from sleeping (`caffeinate` on macOS). This only works while the Mac is plugged in, and a MacBook still sleeps when its lid is closed without an external display.
 
+## Node editor (preview on the `node-ui` branch)
+
+The **Nodes** tab replaces the job list and the folders: you build what gets rendered as a vertical graph.
+
+```
+Blender overrides / App behaviour     settings nodes, optional, chainable
+              │
+             Job                      a .blend file – one output socket per scene
+              │
+     (settings for this output only)
+              │
+            Output                    name, render folder, colour – one job folder each
+```
+
+- **Defaults come from Blender.** A settings node only changes the fields you tick; everything else is
+  taken from the .blend as saved. A lower node overrides the same field of a higher one.
+- **Blender overrides:** frame range and step, samples, noise threshold, denoiser, resolution % or fixed size,
+  camera, view layer, image format and bit depth. **App behaviour:** attempts, retry wait, frame timeout,
+  restarting Blender, preview video, file check, consistency check, ignoring add-ons.
+- **Job node:** the file, the Blender install, and per computer GPU / CPU / Off. After adding a file the app
+  asks Blender for its scenes; with several scenes each one gets its own socket, so one file can feed several
+  outputs (right-click → *Add output per scene*).
+- **Output node:** what was a job before. Its name is the job folder's name. Render folder: next to the .blend
+  by default, or a folder of its own. Each output has a colour, shown in the scheduler.
+- **Scheduler node:** every output in render order. Select outputs and press *Push up* / *Push down* (several
+  move as a block) or ⤒ to put them next. The job that is rendering finishes first. *Cancel* stops a rendering
+  job and mutes its output; unmuting continues it. *Machines…* opens the Machines tab.
+- **On / off:** mute a node with **M** (like Blender), or disconnect the output. A muted settings node is
+  bypassed; a muted job or output is skipped. Finished frames are always kept.
+- **Changing settings later:** a change that alters the image (samples, resolution, scene, format …) after
+  frames were rendered puts the job on hold: continue with the new settings or start the job over.
+- **Presets:** select settings nodes → *Save preset…* writes a `.bbrpreset` file; *Load preset…* inserts a copy
+  into any queue.
+- **Frames** (⌘J) group nodes and replace the old queue folders; nodes inside move with the frame.
+- The **List** tab still shows every job with its progress; ticking or dragging there mutes or reorders the
+  outputs. Live, Issues and Machines on the right follow the selected output node.
+- Old queue files are converted when opened: each job gets a job and an output node (plus settings nodes for
+  settings that differ from the defaults). Jobs from the API or the Blender add-on get nodes the same way.
+
 ## Status page & API
 
 While the app runs, it serves a **status page** that works in any browser: *Help → Status page*, or http://127.0.0.1:8642/. It shows the batch and per-job progress, the frame being rendered with Blender's remaining time, the last finished frame, the queue with its folders, and Blender's console. It also has Start / Stop after frame / Stop now buttons. It updates every two seconds.
@@ -223,6 +262,8 @@ The queue itself lives in `~/Library/Application Support/BlenderBatchRenderer/` 
 - crashing workers and a worker that disappears;
 - stop now and stop after frame;
 - the coordinator rendering together with a worker.
+
+`python3 tests/test_nodegraph.py` tests the node graph: resolving settings, connection rules, scenes, the scheduler, presets, syncing with the queue, queue files, and rendering two scenes of one file.
 
 `python3 tests/test_api.py` tests the API, queue files, the default render folder and the Blender add-on (with a stand-in for Blender's Python module).
 

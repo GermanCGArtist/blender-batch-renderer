@@ -475,9 +475,7 @@ class Runner:
             "skip": job.skip_frames(),
             "dynamic": True,
             "max_frames": int(s.restart_every or 0),
-            "overrides": {"frame_start": s.frame_start, "frame_end": s.frame_end,
-                          "samples": s.samples, "resolution_pct": s.resolution_pct,
-                          "device": device_for(job, self.scheduler.local.name)},
+            "overrides": s.blender_overrides(device_for(job, self.scheduler.local.name)),
         }
         args_path = job.tmp_dir / f"args_{n:03d}.json"
         atomic_write_json(args_path, args)

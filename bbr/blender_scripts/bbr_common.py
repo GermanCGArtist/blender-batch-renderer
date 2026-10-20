@@ -45,10 +45,80 @@ def is_eevee(engine):
     return engine.startswith("BLENDER_EEVEE")
 
 
+def pick_scene(ov):
+    """The scene to render: the one named in the overrides, else the file's active scene."""
+    name = (ov or {}).get("scene")
+    if name:
+        sc = bpy.data.scenes.get(name) if hasattr(bpy.data.scenes, "get") else \
+            next((s for s in bpy.data.scenes if s.name == name), None)
+        if sc is None:
+            warn("Scene '%s' not found in the file - rendering the active scene" % name)
+        else:
+            return sc
+    return bpy.context.scene
+
+
+def render_kwargs(scene, ov):
+    """Arguments for bpy.ops.render.render: the scene (when not the active one) and a single view layer."""
+    kw = {}
+    ov = ov or {}
+    if ov.get("scene") and scene is not bpy.context.scene:
+        kw["scene"] = scene.name
+    if ov.get("view_layer"):
+        kw["layer"] = ov["view_layer"]
+    return kw
+
+
 def apply_overrides(scene, ov):
     """Only the parameters exposed in the batch renderer; everything else stays as saved."""
     ov = ov or {}
     applied = []
+    if ov.get("scene"):
+        applied.append("scene=%s" % scene.name)
+    if ov.get("frame_step") is not None:
+        scene.frame_step = max(1, int(ov["frame_step"]))
+        applied.append("frame_step=%s" % ov["frame_step"])
+    if ov.get("camera"):
+        cam = next((o for o in getattr(bpy.data, "objects", []) if o.name == ov["camera"]), None)
+        if cam is None or getattr(cam, "type", "CAMERA") != "CAMERA":
+            warn("Camera '%s' not found - using the scene's camera" % ov["camera"])
+        else:
+            scene.camera = cam
+            applied.append("camera=%s" % cam.name)
+    if ov.get("view_layer"):
+        names = [vl.name for vl in scene.view_layers]
+        if ov["view_layer"] not in names:
+            warn("View layer '%s' not found in scene '%s'" % (ov["view_layer"], scene.name))
+        else:
+            applied.append("view_layer=%s" % ov["view_layer"])
+    if ov.get("res_x") and ov.get("res_y"):
+        scene.render.resolution_x = int(ov["res_x"])
+        scene.render.resolution_y = int(ov["res_y"])
+        applied.append("resolution=%sx%s" % (ov["res_x"], ov["res_y"]))
+    if ov.get("file_format"):
+        try:
+            scene.render.image_settings.file_format = ov["file_format"]
+            applied.append("file_format=%s" % ov["file_format"])
+        except Exception as e:  # noqa: BLE001 - unknown format in this Blender version
+            warn("Output format %s not available: %s" % (ov["file_format"], e))
+    if ov.get("color_depth"):
+        try:
+            scene.render.image_settings.color_depth = str(ov["color_depth"])
+            applied.append("color_depth=%s" % ov["color_depth"])
+        except Exception as e:  # noqa: BLE001 - e.g. 16 bit for JPEG
+            warn("Bit depth %s not available for this format: %s" % (ov["color_depth"], e))
+    if scene.render.engine == "CYCLES":
+        if ov.get("noise_threshold") is not None:
+            t = float(ov["noise_threshold"])
+            scene.cycles.use_adaptive_sampling = t > 0
+            if t > 0:
+                scene.cycles.adaptive_threshold = t
+            applied.append("noise_threshold=%s" % t)
+        if ov.get("denoise") is not None:
+            scene.cycles.use_denoising = bool(ov["denoise"])
+            applied.append("denoise=%s" % bool(ov["denoise"]))
+    elif ov.get("noise_threshold") is not None or ov.get("denoise") is not None:
+        warn("Noise threshold and denoiser only apply to Cycles (this scene uses %s)" % scene.render.engine)
     if ov.get("frame_start") is not None:
         scene.frame_start = int(ov["frame_start"])
         applied.append("frame_start=%s" % ov["frame_start"])

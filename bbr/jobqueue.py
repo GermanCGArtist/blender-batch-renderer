@@ -6,6 +6,7 @@ jobs at the top level first, then each folder's jobs, top to bottom.
 """
 from __future__ import annotations
 
+import copy
 import os
 import re
 import threading
@@ -28,11 +29,43 @@ def _safe_name(s: str) -> str:
     return s or "job"
 
 
+def _graph_for_compare(graph: Optional[dict]) -> Optional[dict]:
+    """The graph as it counts for "unsaved changes": the view (zoom, scroll) doesn't count."""
+    if not graph:
+        return None
+    g = {k: v for k, v in graph.items() if k != "view"}
+    return copy.deepcopy(g)
+
+
+def _graph_paths(graph: Optional[dict], base: str, to_rel: bool) -> Optional[dict]:
+    """Queue files store the graph's paths (job files, render folders) relative to the queue file too,
+    so a project folder can be moved as a whole."""
+    if not graph:
+        return graph
+    for n in (graph.get("nodes") or {}).values():
+        p = n.get("props") or {}
+        for key in ("blend", "render_root"):
+            if to_rel:
+                if p.get(key):
+                    try:
+                        p[key + "_rel"] = os.path.relpath(p[key], base)
+                    except ValueError:          # different drive on Windows
+                        p[key + "_rel"] = None
+            else:
+                rel = p.pop(key + "_rel", None)
+                if p.get(key) and rel and not os.path.exists(p[key]):
+                    alt = os.path.normpath(os.path.join(base, rel))
+                    if os.path.exists(alt):
+                        p[key] = alt
+    return graph
+
+
 class JobQueue:
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else app_data_dir() / "queue.json"
         self.jobs: List[Job] = []
         self.groups: List[dict] = []     # {"id", "name", "enabled", "expanded", "render_root"}
+        self.graph: Optional[dict] = None   # the node editor's graph (bbr/nodes/graph.py), None = none yet
         self.lock = threading.RLock()
         self.on_change = None            # called after every change of the queue's structure
 
@@ -43,6 +76,7 @@ class JobQueue:
         data = read_json(self.path, {}) or {}
         self.groups = [dict({"enabled": True, "expanded": True, "render_root": ""}, **g)
                        for g in data.get("groups", [])]
+        self.graph = data.get("graph") or None
         self.jobs = []
         for folder in data.get("jobs", []):
             j = Job.load(folder)
@@ -61,7 +95,8 @@ class JobQueue:
 
     def save(self) -> None:
         with self.lock:
-            atomic_write_json(self.path, {"groups": self.groups, "jobs": [j.folder for j in self.jobs]})
+            atomic_write_json(self.path, {"groups": self.groups, "jobs": [j.folder for j in self.jobs],
+                                          "graph": self.graph})
         if self.on_change:
             try:
                 self.on_change()
@@ -77,6 +112,7 @@ class JobQueue:
                 "groups": [{k: g.get(k) for k in ("id", "name", "enabled", "render_root")} for g in self.groups],
                 "jobs": [{"folder": os.path.abspath(j.folder), "group": j.group or "", "enabled": bool(j.enabled)}
                          for j in self.jobs],
+                "graph": _graph_for_compare(self.graph),
             }
 
     def save_file(self, path: str) -> None:
@@ -88,7 +124,8 @@ class JobQueue:
                 e["rel"] = os.path.relpath(e["folder"], base)
             except ValueError:          # different drive on Windows
                 e["rel"] = None
-        data = {"format": QUEUE_FORMAT, "version": 1, "app": "Blender Batch Renderer",
+        graph = _graph_paths(copy.deepcopy(self.graph), base, to_rel=True) if self.graph else None
+        data = {"format": QUEUE_FORMAT, "version": 1, "app": "Blender Batch Renderer", "graph": graph,
                 "groups": [dict(g, expanded=next((x.get("expanded", True) for x in self.groups
                                                   if x["id"] == g["id"]), True)) for g in snap["groups"]],
                 "jobs": snap["jobs"]}
@@ -111,7 +148,8 @@ class JobQueue:
             jobs.append({"folder": os.path.abspath(folder) if folder else folder,
                          "group": e.get("group", ""), "enabled": bool(e.get("enabled", True))})
         groups = [{k: g.get(k) for k in ("id", "name", "enabled", "render_root")} for g in d.get("groups", [])]
-        return {"groups": groups, "jobs": jobs, "_expanded": {g.get("id"): g.get("expanded", True)
+        graph = _graph_paths(d.get("graph"), base, to_rel=False) if d.get("graph") else None
+        return {"groups": groups, "jobs": jobs, "graph": graph, "_expanded": {g.get("id"): g.get("expanded", True)
                                                            for g in d.get("groups", [])}}
 
     def load_file(self, path: str) -> List[str]:
@@ -122,6 +160,7 @@ class JobQueue:
         warnings = []
         with self.lock:
             self.groups = [dict(g, expanded=snap["_expanded"].get(g["id"], True)) for g in snap["groups"]]
+            self.graph = snap.get("graph")
             self.jobs = []
             for e in snap["jobs"]:
                 j = Job.load(e["folder"])
@@ -141,6 +180,7 @@ class JobQueue:
         """Empty queue (job folders stay on disk)."""
         with self.lock:
             self.jobs, self.groups = [], []
+            self.graph = None
         self.save()
 
     def save_job(self, job: Job) -> None:
@@ -226,12 +266,13 @@ class JobQueue:
     def find(self, job_id: str) -> Optional[Job]:
         return next((j for j in self.jobs if j.id == job_id), None)
 
-    def add(self, blend_path: str, settings: JobSettings, group: str = "") -> Job:
-        """Create (or re-attach to) the job folder for a .blend file."""
+    def add(self, blend_path: str, settings: JobSettings, group: str = "", name: str = "") -> Job:
+        """Create (or re-attach to) the job folder for a .blend file. `name` = the job folder's name
+        (default: the file's name); the node editor passes the output node's name."""
         blend_path = os.path.abspath(os.path.expanduser(blend_path))
         root = settings.render_root or os.path.join(os.path.dirname(blend_path), "render")
         settings.render_root = root
-        base = _safe_name(Path(blend_path).stem)
+        base = _safe_name(name or Path(blend_path).stem)
         with self.lock:
             name, n = base, 1
             while True:

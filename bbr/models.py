@@ -59,6 +59,27 @@ class JobSettings:
     devices: dict = field(default_factory=dict)  # machine name -> "gpu" / "cpu" / "off" (missing = as in the file)
     transfer: str = "full"                # "full": everything up front ("smart" – streaming – is switched off for now)
     consistency_check: bool = True        # a new computer first renders a frame that is compared with this one
+    # ---- further Blender overrides (set by the node editor; None = as saved in the .blend) ----
+    scene: Optional[str] = None           # render this scene instead of the file's active one
+    view_layer: Optional[str] = None      # render only this view layer
+    camera: Optional[str] = None          # camera object to render through
+    frame_step: Optional[int] = None
+    noise_threshold: Optional[float] = None   # Cycles adaptive sampling threshold (0 = adaptive off)
+    denoise: Optional[bool] = None
+    res_x: Optional[int] = None           # fixed resolution in pixels
+    res_y: Optional[int] = None
+    file_format: Optional[str] = None     # image format, e.g. PNG, OPEN_EXR, JPEG, TIFF
+    color_depth: Optional[str] = None     # "8", "16", "32"
+
+    OVERRIDE_KEYS = ("frame_start", "frame_end", "frame_step", "samples", "resolution_pct", "scene",
+                     "view_layer", "camera", "noise_threshold", "denoise", "res_x", "res_y",
+                     "file_format", "color_depth")
+
+    def blender_overrides(self, device: str = "") -> dict:
+        """What the render script changes in the file. Keys that are None are left as saved."""
+        d = {k: getattr(self, k) for k in self.OVERRIDE_KEYS}
+        d["device"] = device
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobSettings":

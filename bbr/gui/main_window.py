@@ -20,7 +20,9 @@ from ..blendfile import version_str
 from ..installs import BlenderInstall, scan
 from ..api import ApiServer
 from ..control import Controller
-from ..jobqueue import JobQueue, QUEUE_EXT
+from ..jobqueue import JobQueue, QUEUE_EXT, _graph_for_compare
+from ..nodes.graph import Graph, OUTPUT, JOB
+from ..nodes.sync import GraphSync
 from ..models import (AppSettings, Job, JobSettings, QUEUED, RENDERING, STOPPED, DONE, DONE_ERRORS,
                       FAILED, CANCELLED, ON_HOLD, F_DONE, F_FAILED, RUNNABLE)
 from ..parse import fmt_duration, fmt_bytes
@@ -58,6 +60,11 @@ class MainWindow(QMainWindow):
         self.settings = AppSettings.load()
         self.queue = JobQueue()
         load_warnings = self.queue.load()
+        # the node graph owns the queue: every output node is one job (bbr/nodes/sync.py)
+        self.graph = Graph(self.queue.graph)
+        self.gsync = GraphSync(self.graph, self.queue, self.settings.defaults)
+        self.gsync.adopt()                 # jobs of an older queue (or from the API) get nodes
+        load_warnings += self.gsync.apply()
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event, Qt.ConnectionType.QueuedConnection)
         self.runner = Runner(self.queue, self.settings, lambda k, p: self.bridge.event.emit(k, p))
@@ -103,6 +110,8 @@ class MainWindow(QMainWindow):
 
         for w in load_warnings:
             self._add_message("warn", w)
+        if getattr(self, "_editor_error", None):
+            self._add_message("error", self._editor_error)
         self._start_api()
         self._update_title()
         self._apply_mode(initial=True)
@@ -172,7 +181,9 @@ class MainWindow(QMainWindow):
         tb = QToolBar("Main")
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        for a in (self.a_add, self.a_new_folder, self.a_remove, self.a_up, self.a_down, None, self.a_start,
+        self.a_new_folder.setVisible(False)       # node frames replace queue folders
+        self.a_edit_folder.setVisible(False)
+        for a in (self.a_add, self.a_remove, self.a_up, self.a_down, None, self.a_start,
                   self.a_stop_after, self.a_stop_now, self.a_cancel, None):
             tb.addSeparator() if a is None else tb.addAction(a)
         self.job_menu = QMenu("Job", self)
@@ -266,7 +277,38 @@ class MainWindow(QMainWindow):
         self.tree.files_dropped.connect(lambda files, gid: self.add_files(files, gid))
         self.tree.check_changed.connect(self._on_check)
         self.tree.expanded_changed.connect(self._on_expanded)
-        hsplit.addWidget(self.tree)
+        self.left_tabs = QTabWidget()
+        self.node_editor = None
+        try:
+            from .node_editor import NodeEditor
+            self.node_editor = NodeEditor(self.graph, self._installs, self._machine_names)
+            self.node_editor.changed.connect(self._graph_edited)
+            self.node_editor.moved.connect(lambda: self._graph_pos_timer.start())
+            self.node_editor.selection.connect(self._on_node_selection)
+            self.node_editor.message_sink = self._add_message
+            self.node_editor.open_folder = lambda p: self._open_path(p) if p else None
+            sc = self.node_editor.scene
+            sc.status_provider = self._node_status
+            sc.machines_provider = self._machines_summary
+            sc.cancel_requested.connect(self._cancel_outputs)
+            sc.open_machines.connect(lambda: self.tabs.setCurrentIndex(3))
+            self.left_tabs.addTab(self.node_editor, "Nodes")
+            self.left_tabs.setTabToolTip(0, "What to render and how: settings → job → output, and the scheduler")
+        except Exception as e:  # noqa: BLE001 - never lose the window over the new editor
+            import traceback
+            traceback.print_exc()
+            self._editor_error = f"The node editor could not start ({e}); the list view still works."
+        self.left_tabs.addTab(self.tree, "List")
+        self.left_tabs.setTabToolTip(self.left_tabs.count() - 1, "The jobs in render order, with their progress")
+        hsplit.addWidget(self.left_tabs)
+        self._graph_timer = QTimer(self)
+        self._graph_timer.setSingleShot(True)
+        self._graph_timer.setInterval(150)
+        self._graph_timer.timeout.connect(self._sync_graph)
+        self._graph_pos_timer = QTimer(self)
+        self._graph_pos_timer.setSingleShot(True)
+        self._graph_pos_timer.setInterval(600)
+        self._graph_pos_timer.timeout.connect(self._save_graph_positions)
         # keys that act on the selected row (only while the queue list has the focus)
         ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
         for key, slot in (("Backspace", self.remove_selected), ("Delete", self.remove_selected),
@@ -293,8 +335,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._scrolled(self.machines_panel), "Machines")
         self.tabs.setTabToolTip(3, "Computers that render this queue, with statistics")
         hsplit.addWidget(self.tabs)
-        hsplit.setStretchFactor(0, 2)
-        hsplit.setStretchFactor(1, 3)
+        hsplit.setStretchFactor(0, 3)
+        hsplit.setStretchFactor(1, 2)
         vsplit.addWidget(hsplit)
 
         # ---- bottom: console + messages -------------------------------------
@@ -616,6 +658,9 @@ class MainWindow(QMainWindow):
         gid = sel[1] if sel and sel[0] == "g" else None
         changed = (jid != self.selected_id) or (gid != self.selected_gid)
         self.selected_id, self.selected_gid = jid, gid
+        if (changed and jid and self.node_editor is not None
+                and self.left_tabs.currentWidget() is not self.node_editor):
+            self.node_editor.select_output_of_job(jid)
         if changed:
             self._load_selected()
         self._update_actions()
@@ -653,21 +698,14 @@ class MainWindow(QMainWindow):
                 m.addSeparator() if a is None else m.addAction(a)
             m.addAction(self.a_play)
             m.addAction(self.a_report)
-            m.addSeparator()
-            mv = m.addMenu("Move to folder")
-            mv.addAction("— top level —").triggered.connect(lambda: self._move_to_group(j, ""))
-            for grp in self.queue.groups:
-                a = mv.addAction(grp["name"])
-                a.setEnabled(grp["id"] != j.group)
-                a.triggered.connect(lambda _=False, gid=grp["id"]: self._move_to_group(j, gid))
-            mv.addSeparator()
-            mv.addAction("New folder…").triggered.connect(lambda: self.new_folder(move_job=j))
+            if self.node_editor is not None:
+                m.addSeparator()
+                m.addAction("Show in node editor").triggered.connect(lambda: self._show_job_node(j.id))
         elif g:
             m.addAction(self.a_edit_folder)
             m.addAction("Add .blend files to this folder…").triggered.connect(lambda: self.add_files(None, g["id"]))
         else:
             m.addAction(self.a_add)
-            m.addAction(self.a_new_folder)
         m.addSeparator()
         for a in (self.a_up, self.a_down, self.a_remove):
             m.addAction(a)
@@ -698,9 +736,10 @@ class MainWindow(QMainWindow):
         self.a_new_queue.setEnabled(not running)
         self.a_open_queue.setEnabled(not running)
         self.recent_menu.setEnabled(not running)
-        self.b_apply.setEnabled(bool(j) and not cur)
-        self.l_form_note.setText("This job is rendering – stop it to change settings." if cur else
-                                 "Changes apply the next time the job renders. Finished frames are kept.")
+        self.b_apply.setEnabled(False)
+        self.job_form.setEnabled(False)
+        self.l_form_note.setText("Settings come from the node editor: select the job's output node and the "
+                                 "settings nodes above it.")
 
     # ======================================================================
     # live panel
@@ -716,6 +755,8 @@ class MainWindow(QMainWindow):
         self._refresh_table()
         self._refresh_live()
         self._refresh_batch()
+        if self.node_editor is not None and self.left_tabs.currentWidget() is self.node_editor:
+            self.node_editor.refresh_status()
 
     def _refresh_batch(self):
         jobs = self.queue.jobs
@@ -990,6 +1031,15 @@ class MainWindow(QMainWindow):
         if not files:
             return
         self.settings.last_blend_dir = os.path.dirname(os.path.abspath(files[0]))
+        self.settings.save()
+        if self.node_editor is not None:
+            # a job node and an output node per file; everything else comes from the file
+            x, y = self.graph.free_position()
+            from PySide6.QtCore import QPointF
+            self.node_editor.scene.add_blends(files, QPointF(x, y))
+            self.left_tabs.setCurrentWidget(self.node_editor)
+            QTimer.singleShot(0, self.node_editor.view.show_all)
+            return
         if gid is None:
             j = self._sel()
             gid = self.selected_gid or (j.group if j else "")
@@ -1009,6 +1059,7 @@ class MainWindow(QMainWindow):
             last = self.queue.add(f, js, group=dlg.group_id)
             self._add_message("info", f"Added {last.name} → {last.folder}"
                               + (" (re-attached to existing render folder, finished frames kept)" if last.frames else ""))
+        self._sync_graph(adopt=True)
         self.selected_id, self.selected_gid = (last.id if last else None), None
         self._refresh_table(full=True)
         self._update_actions()
@@ -1024,6 +1075,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Add job folder", str(e))
             return
         self._add_message("info", f"Re-added {j.name} from {j.folder} ({j.count(F_DONE)} frames already done)")
+        self._sync_graph(adopt=True)
         self.selected_id, self.selected_gid = j.id, None
         self._refresh_table(full=True)
         self._update_actions()
@@ -1057,11 +1109,20 @@ class MainWindow(QMainWindow):
         self._refresh_table(full=True)
 
     def _on_tree_order(self, top, groups):
-        self.queue.set_order(top, groups)
-        self._refresh_table(full=True)
+        # dragging in the list = reordering the scheduler
+        ids = list(top) + [jid for _gid, jids in groups for jid in jids]
+        rank = {jid: i for i, jid in enumerate(ids)}
+        self.graph.order.sort(key=lambda oid: rank.get((self.graph.nodes[oid]["props"].get("job_id") or ""), len(ids)))
+        self._graph_changed_here()
 
     def _on_check(self, kind, ident, checked):
         if kind == "j":
+            outs = self._outputs_of_job(ident)
+            for o in outs:
+                o["muted"] = not checked          # the tick = the output node's mute
+            if outs:
+                self._graph_changed_here()
+                return
             j = self.queue.find(ident)
             if j:
                 self.queue.set_enabled(j, checked)
@@ -1094,13 +1155,28 @@ class MainWindow(QMainWindow):
                                 "to the same render folder again picks up where it left off.") \
                 != QMessageBox.StandardButton.Yes:
             return
+        outs = self._outputs_of_job(j.id)
+        for o in outs:
+            self.graph.remove_node(o["id"])     # the output node goes too, or the job would come back
         self.queue.remove(j)
         self.selected_id = None
+        if outs:
+            self._graph_changed_here()
         self._refresh_table(full=True)
         self._update_actions()
 
     def move_selected(self, d):
         j = self._sel()
+        if self.node_editor is not None and self.node_editor.view.hasFocus():
+            sel = [i for i in self.node_editor.scene.selected_ids() if self.graph.nodes.get(i, {}).get("type") == OUTPUT]
+            if sel:
+                self.graph.move_block(sel, d)
+                self._graph_changed_here()
+                return
+        if j and self._outputs_of_job(j.id):
+            self.graph.move_block([o["id"] for o in self._outputs_of_job(j.id)], d)
+            self._graph_changed_here()
+            return
         if j:
             self.queue.move(j, d)
         elif self.selected_gid:
@@ -1193,6 +1269,7 @@ class MainWindow(QMainWindow):
         snap = JobQueue.read_file_snapshot(path)
         if snap:
             snap.pop("_expanded", None)
+            snap["graph"] = _graph_for_compare(snap.get("graph"))
         return snap
 
     def _is_modified(self) -> bool:
@@ -1238,6 +1315,7 @@ class MainWindow(QMainWindow):
         if self._busy_rendering("start a new queue") or not self._confirm_discard("start a new queue"):
             return
         self.queue.clear()
+        self._reset_graph()
         self.settings.current_queue_file = ""
         self.settings.save()
         self._saved_snapshot = None
@@ -1266,6 +1344,7 @@ class MainWindow(QMainWindow):
         except (ValueError, OSError) as e:
             QMessageBox.warning(self, "Open queue", f"Could not open {os.path.basename(path)}:\n{e}")
             return
+        self._reset_graph()
         self.settings.current_queue_file = path
         self.settings.add_recent(path)
         self.settings.save()
@@ -1394,6 +1473,8 @@ class MainWindow(QMainWindow):
             self._update_title()
 
     def _after_api_change(self):
+        self.gsync.pull_enabled()
+        self._sync_graph(adopt=True, prune=True)
         self._refresh_table(full=True)
         self._update_actions()
         self._refresh_live()
@@ -1427,12 +1508,16 @@ class MainWindow(QMainWindow):
 
     def show_shortcuts(self):
         rows = [("⌘N", "New queue"), ("⌘O", "Open queue…"), ("⌘S / ⇧⌘S", "Save queue / Save as…"),
-                ("⌘I", "Add .blend files…"), ("⇧⌘N", "New folder…"),
-                ("⌫ / Delete", "Remove the selected job or folder (asks first)"),
+                ("⌘I", "Add .blend files…"),
+                ("⌫ / Delete", "List: remove the selected job (asks first)"),
                 ("⌘⌫", "Remove without asking"), ("↩", "Open the job's render folder / folder settings"),
                 ("Space", "Play the preview video"), ("⌘↑ / ⌘↓", "Move up / down"),
                 ("⌘R", "Start"), ("⇧⌘.", "Stop after this frame"), ("⌘.", "Stop now"),
-                ("⌘P", "Create preview"), ("⌘,", "Settings"), ("⌘/", "This list")]
+                ("⌘P", "Create preview"), ("⌘,", "Settings"), ("⌘/", "This list"),
+                ("", "<b>Node editor</b>"), ("⇧A", "Add a node"), ("M", "Mute / unmute"),
+                ("X / ⌫", "Delete the selection"), ("⌘J", "Put the selected nodes in a frame"),
+                ("⌘D", "Duplicate settings nodes"), ("Home", "Show everything"),
+                ("Middle drag / ⌥ drag", "Pan (trackpad: two fingers; pinch zooms)"), ("Wheel", "Zoom")]
         html = "<table cellspacing=6>" + "".join(f"<tr><td><b>{k}</b></td><td>{v}</td></tr>" for k, v in rows) + \
                "</table><p style='color:gray'>On Windows/Linux, ⌘ is Ctrl.</p>"
         QMessageBox.information(self, "Keyboard shortcuts", html)
@@ -1508,6 +1593,119 @@ class MainWindow(QMainWindow):
         self._update_actions()
 
     # ======================================================================
+    # node editor
+    # ======================================================================
+    def _graph_edited(self):
+        """The node editor changed the graph: push it into the queue a moment later (several quick
+        edits make one sync; the editor is never rebuilt while one of its own signals runs)."""
+        self._graph_timer.start()
+
+    def _graph_changed_here(self):
+        """The window changed the graph (list view, toolbar): redraw the editor and sync."""
+        if self.node_editor is not None:
+            self.node_editor.reload()
+        self._sync_graph()
+
+    def _sync_graph(self, adopt: bool = False, prune: bool = False):
+        self.gsync.defaults = self.settings.defaults
+        if prune:
+            self.gsync.prune_removed()
+        new = self.gsync.adopt() if adopt else []
+        for m in self.gsync.apply():
+            self._add_message("info", m)
+        if self.node_editor is not None:
+            if new or prune:
+                self.node_editor.reload()
+            else:
+                self.node_editor.scene.refresh_all_nodes()
+                self.node_editor.scene.refresh_scheduler()
+        self._refresh_table(full=True)
+        self._update_actions()
+        self._update_title()
+
+    def _save_graph_positions(self):
+        self.queue.graph = self.graph.to_dict()
+        self.queue.save()
+        self._update_title()
+
+    def _reset_graph(self):
+        """A new or opened queue: its own graph (an old queue file gets one built from its jobs)."""
+        self.graph = Graph(self.queue.graph)
+        self.gsync.graph = self.graph
+        if self.node_editor is not None:
+            self.node_editor.set_graph(self.graph)
+        self._sync_graph(adopt=True)
+
+    def _outputs_of_job(self, job_id: str):
+        return [o for o in self.graph.of_type(OUTPUT) if o["props"].get("job_id") == job_id]
+
+    def _show_job_node(self, job_id: str):
+        outs = self._outputs_of_job(job_id)
+        if outs and self.node_editor is not None:
+            self.left_tabs.setCurrentWidget(self.node_editor)
+            self.node_editor.focus(outs[0]["id"])
+
+    def _on_node_selection(self, ids):
+        """Selecting an output (or a job) node shows its job in the panels on the right."""
+        jid = None
+        for i in ids:
+            n = self.graph.nodes.get(i)
+            if not n:
+                continue
+            if n["type"] == OUTPUT and n["props"].get("job_id"):
+                jid = n["props"]["job_id"]
+                break
+            if n["type"] == JOB:
+                for l in self.graph.links_from(i):
+                    o = self.graph.nodes.get(l["to"][0])
+                    if o and o["type"] == OUTPUT and o["props"].get("job_id"):
+                        jid = o["props"]["job_id"]
+                        break
+        if jid and jid in self.tree.job_items and jid != self.selected_id:
+            self.tree.select("j", jid)
+
+    def _node_status(self, job_id: str):
+        j = self.queue.find(job_id)
+        if j is None:
+            return None
+        total = j.total_frames
+        done = j.count(F_DONE)
+        frac = self.runner.job_progress(j)
+        if frac is None and total:
+            frac = done / total
+        txt = j.status
+        if total:
+            txt += f" · {done}/{total}"
+        failed = j.count(F_FAILED)
+        if failed:
+            txt += f" · {failed} failed"
+        return (txt, STATUS_COLORS.get(j.status, "#3d8bfd"), frac)
+
+    def _machines_summary(self) -> str:
+        names = self._machine_names()
+        if not self.settings.share_with_workers:
+            return "This computer only (sharing with workers is off)"
+        return f"{len(names)} computer{'s' if len(names) != 1 else ''}: " + ", ".join(n for n, _ in names)
+
+    def _cancel_outputs(self, out_ids):
+        """Scheduler 'Cancel': stop the job if it is rendering and mute its output (frames are kept)."""
+        outs = [self.graph.nodes[i] for i in out_ids if i in self.graph.nodes]
+        if not outs:
+            return
+        cur = self.runner.current
+        names = ", ".join(o["props"].get("name") or "Output" for o in outs)
+        if QMessageBox.question(self, "Cancel", f"Cancel {names}?\nIt is switched off (muted); finished frames "
+                                "are kept, and unmuting it continues where it stopped.") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        for o in outs:
+            o["muted"] = True
+            if cur is not None and o["props"].get("job_id") == cur.id:
+                self.runner.cancel_current_job()
+        # later: this runs inside a click on the scheduler node, which a redraw would delete
+        QTimer.singleShot(0, self._graph_changed_here)
+
+    # ======================================================================
     # drag & drop, closing
     # ======================================================================
     def dragEnterEvent(self, e):
@@ -1518,6 +1716,11 @@ class MainWindow(QMainWindow):
         self.add_files([u.toLocalFile() for u in e.mimeData().urls()])
 
     def closeEvent(self, e):
+        try:
+            self.queue.graph = self.graph.to_dict()     # node positions moved in the last moment
+            self.queue.save()
+        except OSError:
+            pass
         if self.settings.mode == "worker":
             if self.worker_view.busy:
                 box = QMessageBox(self)

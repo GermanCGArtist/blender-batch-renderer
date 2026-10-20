@@ -83,8 +83,7 @@ def build_package(job, inst, on_line, frames: Optional[List[int]] = None) -> dic
     build.mkdir(parents=True, exist_ok=True)
     s = job.settings
     args = {"out_dir": str(build),
-            "overrides": {"frame_start": s.frame_start, "frame_end": s.frame_end,
-                          "samples": s.samples, "resolution_pct": s.resolution_pct}}
+            "overrides": s.blender_overrides("")}
     job.ensure_folders()
     args_path = job.tmp_dir / "package_args.json"
     atomic_write_json(args_path, args)

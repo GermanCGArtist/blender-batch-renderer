@@ -21,6 +21,7 @@ Behaviour switches (environment variables):
   FAKE_IMAGES entries starting with "seq:" are image sequences (e.g. seq:/abs/passes/pass_0001.exr)
   FAKE_SEQ_USER=1,0,0,0   start,offset,duration,cyclic of the node using the image sequence
   FAKE_PNG_COLOR=0,255,0  colour of rendered frames (consistency check tests)
+  FAKE_SCENES=Closeup:5-8,Wide:1-3   further scenes (name:frame range) besides "Scene"
 """
 import os
 import struct
@@ -58,7 +59,8 @@ ims = NS(file_format="FFMPEG" if env.get("FAKE_VIDEO") else "PNG", color_depth="
 class RenderNS(types.SimpleNamespace):
     @property
     def file_extension(self):
-        return ".png" if self.image_settings.file_format == "PNG" else ".mp4"
+        ff = self.image_settings.file_format
+        return {"PNG": ".png", "OPEN_EXR": ".exr", "JPEG": ".jpg", "TIFF": ".tif"}.get(ff, ".mp4")
 
 
 render = RenderNS(engine="CYCLES", fps=24, fps_base=1.0, resolution_x=1920, resolution_y=1080,
@@ -92,18 +94,35 @@ scene = Scene(sequence_editor=None, name="Scene", render=render, cycles=NS(sampl
               view_settings=NS(view_transform="AgX", look="None", exposure=0.0, gamma=1.0),
               compositing_node_group=None, use_nodes=False, objects=[], rigidbody_world=None)
 
+class SceneList(list):
+    def get(self, name, default=None):
+        return next((x for x in self if x.name == name), default)
+
+
+all_scenes = SceneList([scene])
+for spec in [x for x in env.get("FAKE_SCENES", "").split(",") if x]:
+    nm, rng = spec.split(":")
+    a, b = (int(x) for x in rng.split("-"))
+    r2 = RenderNS(**dict(vars(render), image_settings=NS(**vars(ims))))
+    all_scenes.append(Scene(**dict(vars(scene), name=nm, render=r2, frame_start=a, frame_end=b, frame_current=a,
+                                   cycles=NS(samples=128, device="CPU"),
+                                   view_layers=[NS(name="ViewLayer", use=True), NS(name="Background", use=True)])))
+
 handlers = NS(render_stats=[])
 state = {"result": False}
 marker_dir = env.get("TMPDIR", "/tmp")
 
 
-def op_render(write_still=False, animation=False):
+def op_render(write_still=False, animation=False, **kw):
+    if kw:
+        print("FAKE_RENDER scene=%s layer=%s" % (kw.get("scene"), kw.get("layer")), flush=True)
     if animation:
         out = render.filepath + "%04d-%04d.mp4" % (scene.frame_start, scene.frame_end)
         with open(out, "wb") as f:
             f.write(b"fake mp4")
         return {"FINISHED"}
-    f = scene.frame_current
+    sc = all_scenes.get(kw["scene"]) if kw.get("scene") else scene
+    f = sc.frame_current
     for img in bpy.data.images:
         if getattr(img, "source", "") == "SEQUENCE" and not img.packed_file:
             p = seq_file_for(img, f)
@@ -229,7 +248,7 @@ def load_data(path, is_main):
             mats.append(NS(node_tree=NS(nodes=[NS(image=im, image_user=iu, bl_idname="ShaderNodeTexImage")])))
     groups = [NS(name=n, nodes=[]) for n in env.get("FAKE_NODE_GROUPS", "").split(",") if n and is_main]
     bpy.data = NS(images=imgs, libraries=libs, sounds=[], movieclips=[], fonts=[], volumes=[], cache_files=[],
-                  node_groups=groups, materials=mats, worlds=[], scenes=[scene], objects=[], cameras=[], lights=[],
+                  node_groups=groups, materials=mats, worlds=[], scenes=all_scenes, objects=[], cameras=[], lights=[],
                   meshes=[], textures=[], filepath=current["file"])
     bpy.data.images.load = load_png
 

@@ -19,7 +19,8 @@ def frame_name(prefix, frame, ext):
 
 def main():
     args = C.script_args()
-    scene = bpy.context.scene
+    scene = C.pick_scene(args.get("overrides"))
+    rkw = C.render_kwargs(scene, args.get("overrides"))
     frames_dir = args["frames_dir"]
     prefix = args.get("prefix", "")
     os.makedirs(frames_dir, exist_ok=True)
@@ -110,7 +111,7 @@ def main():
         t0 = time.time()
         try:
             scene.frame_set(f)
-            bpy.ops.render.render(write_still=False)
+            bpy.ops.render.render(write_still=False, **rkw)
             t1 = time.time()
             img = bpy.data.images.get("Render Result")
             if img is None:

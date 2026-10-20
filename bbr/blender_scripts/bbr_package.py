@@ -322,7 +322,7 @@ def save_copy(path):
 
 def main():
     os.makedirs(os.path.join(OUT, "libs"), exist_ok=True)
-    scene = bpy.context.scene
+    scene = C.pick_scene(ARGS.get("overrides"))
     addons = C.enabled_addons()
     used = C.used_addons(addons)
     find_unbaked(scene)
