@@ -127,7 +127,7 @@ pub fn live_tab(ui: &mut egui::Ui, job: Option<&Job>, live: &LiveState) {
             egui::Sense::hover(),
         );
         let painter = ui.painter_at(rect);
-        painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::GRAY));
+        painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0_f32, egui::Color32::GRAY));
         let max = secs.iter().cloned().fold(0.0_f64, f64::max).max(0.001);
         let n = secs.len() as f64;
         let mut prev: Option<egui::Pos2> = None;
@@ -137,7 +137,7 @@ pub fn live_tab(ui: &mut egui::Ui, job: Option<&Job>, live: &LiveState) {
             let p = egui::pos2(x, yy);
             painter.circle_filled(p, 2.0, egui::Color32::from_rgb(0x3d, 0x8b, 0xfd));
             if let Some(pp) = prev {
-                painter.line_segment([pp, p], egui::Stroke::new(2.0, egui::Color32::from_rgb(0x3d, 0x8b, 0xfd)));
+                painter.line_segment([pp, p], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x3d, 0x8b, 0xfd)));
             }
             prev = Some(p);
         }

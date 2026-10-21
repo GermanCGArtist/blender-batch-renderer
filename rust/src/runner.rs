@@ -4,7 +4,7 @@
 use crate::installs::resolve_blender;
 use crate::jobqueue::JobQueue;
 use crate::models::{AttemptRecord, Job, Status};
-use crate::process::run_blender;
+use crate::process::{run_blender, RunOutcome};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -353,6 +353,11 @@ fn render_attempt(
                 stop.store(true, Ordering::Relaxed);
             }
         }
+    })
+    .unwrap_or(RunOutcome {
+        exit_code: None,
+        timed_out: true,
+        killed: true,
     });
 
     // count done frames from the log ("Fra:42 ... Saved: '...'" per frame)

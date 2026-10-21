@@ -37,7 +37,8 @@ pub fn run_blender(
         .args(&cmd[1..])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         // keep Windows from opening a console window per Blender run
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000);
@@ -50,7 +51,9 @@ pub fn run_blender(
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let (tx, rx) = mpsc::channel::<String>();
-    for stream in [stdout, stderr] {
+    let mut streams: Vec<Box<dyn std::io::Read + Send>> =
+        vec![Box::new(stdout), Box::new(stderr)];
+    for stream in streams.drain(..) {
         let tx = tx.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stream);

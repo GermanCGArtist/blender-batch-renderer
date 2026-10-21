@@ -70,7 +70,7 @@ pub fn candidate_paths() -> Vec<PathBuf> {
         for d in [
             format!("{}/.local/bin", home),
             format!("{}/bin", home),
-            "/usr/local/blender",
+            "/usr/local/blender".to_string(),
         ] {
             let p = Path::new(&d).join("blender");
             if p.exists() {

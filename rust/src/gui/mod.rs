@@ -32,7 +32,7 @@ pub fn run_gui() -> anyhow::Result<()> {
     eframe::run_native(
         "bbr",
         options,
-        Box::new(|_cc| Box::new(BbrApp::new())),
+        Box::new(|_cc| Ok(Box::new(BbrApp::new()))),
     )
     .map_err(|e| anyhow::anyhow!("gui error: {e}"))?;
     Ok(())
@@ -433,8 +433,10 @@ impl eframe::App for BbrApp {
             match action {
                 queue::QueueAction::None => {}
                 queue::QueueAction::Requeue { name, keep } => {
-                    let mut q = self.queue.lock().unwrap();
-                    let _ = q.requeue(&name, keep);
+                    {
+                        let mut q = self.queue.lock().unwrap();
+                        let _ = q.requeue(&name, keep);
+                    }
                     self.message(format!(
                         "{} queued again ({})",
                         name,
@@ -442,8 +444,11 @@ impl eframe::App for BbrApp {
                     ));
                 }
                 queue::QueueAction::AcceptChanged(name) => {
-                    let mut q = self.queue.lock().unwrap();
-                    if q.accept_changed_blend(&name) {
+                    let accepted = {
+                        let mut q = self.queue.lock().unwrap();
+                        q.accept_changed_blend(&name)
+                    };
+                    if accepted {
                         self.message(format!("{} continues with the changed .blend", name));
                     }
                 }
@@ -475,6 +480,7 @@ impl eframe::App for BbrApp {
                 let dlg = self.add_dialog.as_mut().unwrap();
                 let mut open = true;
                 let mut add = false;
+                let mut cancel = false;
                 egui::Window::new("Add .blend files")
                     .open(&mut open)
                     .default_width(520.0)
@@ -529,7 +535,7 @@ impl eframe::App for BbrApp {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             if ui.button("Cancel").clicked() {
-                                open = false;
+                                cancel = true;
                             }
                             if ui
                                 .add_enabled(
@@ -539,29 +545,34 @@ impl eframe::App for BbrApp {
                                 .clicked()
                             {
                                 add = true;
-                                open = false;
                             }
                         });
                     });
+                if add || cancel {
+                    open = false;
+                }
                 if !open {
                     result = Some(add);
                 }
             }
             if let Some(add) = result {
                 if add {
-                    let dlg = self.add_dialog.as_ref().unwrap();
-                    let mut q = self.queue.lock().unwrap();
+                    // copy what we need out of the dialog first so no borrow
+                    // of self is held while the queue is locked
+                    let (files, folder, settings) = {
+                        let dlg = self.add_dialog.as_ref().unwrap();
+                        (dlg.files.clone(), dlg.folder.clone(), dlg.settings.clone())
+                    };
                     let mut ok = 0;
-                    for f in &dlg.files {
-                        if q
-                            .add(
-                                Path::new(f),
-                                dlg.settings.clone(),
-                                dlg.folder.as_deref(),
-                            )
-                            .is_ok()
-                        {
-                            ok += 1;
+                    {
+                        let mut q = self.queue.lock().unwrap();
+                        for f in &files {
+                            if q
+                                .add(Path::new(f), settings.clone(), folder.as_deref())
+                                .is_ok()
+                            {
+                                ok += 1;
+                            }
                         }
                     }
                     self.message(format!("{} job(s) added", ok));
