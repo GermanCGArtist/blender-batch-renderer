@@ -571,14 +571,16 @@ impl eframe::App for BbrApp {
         }
 
         // ---- new folder dialog ----
-        if let Some(buffer) = self.new_folder.as_mut() {
+        if self.new_folder.is_some() {
+            // keep the text in a local so we do not hold a borrow of self
+            let mut buffer = self.new_folder.clone().unwrap();
             let mut open = true;
             let mut create = false;
             egui::Window::new("New folder")
                 .open(&mut open)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.text_edit_singleline(buffer);
+                    ui.text_edit_singleline(&mut buffer);
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
                             open = false;
@@ -594,7 +596,7 @@ impl eframe::App for BbrApp {
                 });
             if !open {
                 if create {
-                    let name = self.new_folder.clone().unwrap().trim().to_string();
+                    let name = buffer.trim().to_string();
                     let _ = self.queue.lock().unwrap().new_folder(&name);
                     self.message(format!("folder '{}' created", name));
                 }
