@@ -49,7 +49,7 @@ pub fn attempts_csv(job: &Job) -> Result<std::path::PathBuf> {
 pub fn xlsx(job: &Job) -> Result<std::path::PathBuf> {
     let mut workbook = rust_xlsxwriter::Workbook::new();
 
-    let mut sheet = workbook.add_worksheet().set_name("frames")?;
+    let sheet = workbook.add_worksheet().set_name("frames")?;
     sheet.write_string(0, 0, "frame")?;
     sheet.write_string(0, 1, "status")?;
     sheet.write_string(0, 2, "attempts")?;
@@ -74,7 +74,7 @@ pub fn xlsx(job: &Job) -> Result<std::path::PathBuf> {
         }
     }
 
-    let mut sheet = workbook.add_worksheet().set_name("attempts")?;
+    let sheet = workbook.add_worksheet().set_name("attempts")?;
     let headers = ["attempt", "started", "ended", "ok", "exit_code", "frames_done", "frames_failed", "log"];
     for (c, h) in headers.iter().enumerate() {
         sheet.write_string(0, c as u16, *h)?;

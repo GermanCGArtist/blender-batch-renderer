@@ -137,7 +137,7 @@ fn worker_loop(
         }
         // claim the next runnable job (disabled jobs are skipped)
         let claimed = {
-            let mut q = queue.lock().unwrap();
+            let q = queue.lock().unwrap();
             let mut claimed = None;
             for folder in q.ordered_jobs() {
                 if let Some(mut job) = Job::load(std::path::Path::new(&folder)) {

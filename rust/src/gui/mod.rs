@@ -425,11 +425,10 @@ impl eframe::App for BbrApp {
 
         // ---- queue tree (centre) ----
         egui::CentralPanel::default().show(ctx, |ui| {
-            let mut action = queue::QueueAction::None;
-            {
+            let action = {
                 let mut q = self.queue.lock().unwrap();
-                action = queue::queue_panel(ui, &mut q, &mut self.selected, running);
-            }
+                queue::queue_panel(ui, &mut q, &mut self.selected, running)
+            };
             match action {
                 queue::QueueAction::None => {}
                 queue::QueueAction::Requeue { name, keep } => {
@@ -628,26 +627,34 @@ impl eframe::App for BbrApp {
         // ---- quit dialog ----
         if self.show_quit && running {
             let mut open = self.show_quit;
+            // the closure must not touch open (egui borrows it), so collect
+            // the outcome in flags and apply them after the window is drawn
+            let mut quit_now = false;
+            let mut quit_after_frame = false;
+            let mut keep = false;
             egui::Window::new("Quit?")
                 .open(&mut open)
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label("Blender is still rendering.");
                     if ui.button("Quit now").clicked() {
-                        self.stop_now();
-                        self.show_quit = false;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        quit_now = true;
                     }
                     if ui.button("Finish this frame, then quit").clicked() {
-                        self.stop_after_frame.store(true, Ordering::Relaxed);
-                        self.message("will quit after the current frame".to_string());
-                        self.show_quit = false;
+                        quit_after_frame = true;
                     }
                     if ui.button("Keep rendering").clicked() {
-                        self.show_quit = false;
+                        keep = true;
                     }
                 });
-            if !open {
+            if quit_now {
+                self.stop_now();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else if quit_after_frame {
+                self.stop_after_frame.store(true, Ordering::Relaxed);
+                self.message("will quit after the current frame".to_string());
+            }
+            if !open || quit_now || quit_after_frame || keep {
                 self.show_quit = false;
             }
         }
@@ -662,7 +669,7 @@ impl eframe::App for BbrApp {
 impl BbrApp {
     /// Apply edited settings to a job (writes job.json).
     fn apply_settings(&mut self, name: &str, settings: &JobSettings) -> anyhow::Result<()> {
-        let mut q = self.queue.lock().unwrap();
+        let q = self.queue.lock().unwrap();
         let mut job = q
             .load_job(name)
             .ok_or_else(|| anyhow::anyhow!("no job named {}", name))?;

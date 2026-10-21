@@ -111,7 +111,7 @@ impl JobQueue {
             name = format!("{}-{}", base, i);
             job_dir = Path::new(&self.root).join(&name);
         }
-        let mut job = Job::new(&job_dir, blend, settings);
+        let job = Job::new(&job_dir, blend, settings);
         job.ensure_folders();
         job.save()?;
         let entry = job_dir.to_string_lossy().to_string();
