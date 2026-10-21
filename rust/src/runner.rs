@@ -19,6 +19,8 @@ pub struct RunConfig {
     pub blender: String,
     /// Stop the whole session once the current jobs finish.
     pub stop_after_job: bool,
+    /// Set while rendering: let the current frame finish, then stop.
+    pub stop_after_frame: Arc<AtomicBool>,
 }
 
 impl Default for RunConfig {
@@ -27,6 +29,7 @@ impl Default for RunConfig {
             workers: 1,
             blender: "auto".to_string(),
             stop_after_job: false,
+            stop_after_frame: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -44,6 +47,11 @@ pub struct SessionSummary {
 #[derive(Clone, Default)]
 pub struct LiveState {
     pub lines: Vec<String>,
+    /// Job the (first busy) worker is rendering; empty = idle.
+    pub cur_job: String,
+    /// Frame that job is on and its progress in percent.
+    pub cur_frame: i32,
+    pub cur_pct: f32,
 }
 
 pub fn fmt_duration(secs: f64) -> String {
@@ -64,7 +72,6 @@ pub fn run_session(
     live: Option<Arc<Mutex<LiveState>>>,
 ) -> Result<SessionSummary> {
     let summary = Arc::new(Mutex::new(SessionSummary::default()));
-    let blender = resolve_blender(&cfg.blender);
     let workers = cfg.workers.max(1);
     let cfg = cfg.clone();
 
@@ -75,14 +82,12 @@ pub fn run_session(
         let stop = stop.clone();
         let pause = pause.clone();
         let live = live.clone();
-        let blender = blender.clone();
         let cfg = cfg.clone();
         handles.push(std::thread::spawn(move || {
             worker_loop(
                 worker_id,
                 &queue,
                 &cfg,
-                &blender,
                 &stop,
                 &pause,
                 &summary,
@@ -108,11 +113,19 @@ fn emit(live: Option<&Arc<Mutex<LiveState>>>, line: String) {
     }
 }
 
+fn clear_cur_frame(live: Option<&Arc<Mutex<LiveState>>>) {
+    if let Some(l) = live {
+        let mut g = l.lock().unwrap();
+        g.cur_job.clear();
+        g.cur_frame = 0;
+        g.cur_pct = 0.0;
+    }
+}
+
 fn worker_loop(
     worker_id: usize,
     queue: &Arc<Mutex<JobQueue>>,
     cfg: &RunConfig,
-    blender: &PathBuf,
     stop: &Arc<AtomicBool>,
     pause: &Arc<AtomicBool>,
     summary: &Arc<Mutex<SessionSummary>>,
@@ -122,13 +135,13 @@ fn worker_loop(
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        // claim the next runnable job
+        // claim the next runnable job (disabled jobs are skipped)
         let claimed = {
             let mut q = queue.lock().unwrap();
             let mut claimed = None;
             for folder in q.ordered_jobs() {
                 if let Some(mut job) = Job::load(std::path::Path::new(&folder)) {
-                    if job.status.runnable() {
+                    if job.enabled && job.status.runnable() {
                         job.mark_started();
                         if job.save().is_ok() {
                             claimed = Some(job);
@@ -143,7 +156,14 @@ fn worker_loop(
             return; // queue empty
         };
         emit(live, format!("[w{}] start {}", worker_id, job.name));
-        let outcome = render_job(&mut job, blender, stop, pause, live);
+        // per-job Blender choice (falls back to the session default)
+        let choice = if job.settings.blender != "auto" && !job.settings.blender.is_empty() {
+            job.settings.blender.clone()
+        } else {
+            cfg.blender.clone()
+        };
+        let blender = resolve_blender(&choice);
+        let outcome = render_job(&mut job, &blender, stop, pause, &cfg.stop_after_frame, live);
         let render_secs = outcome.1;
         {
             let mut s = summary.lock().unwrap();
@@ -167,6 +187,7 @@ fn worker_loop(
                 outcome.0.frames_failed
             ),
         );
+        clear_cur_frame(live);
         let _ = job.save();
         if cfg.stop_after_job && !stop.load(Ordering::Relaxed) {
             return;
@@ -181,6 +202,7 @@ fn render_job(
     blender: &PathBuf,
     stop: &Arc<AtomicBool>,
     pause: &Arc<AtomicBool>,
+    stop_after_frame: &Arc<AtomicBool>,
     live: Option<&Arc<Mutex<LiveState>>>,
 ) -> (AttemptRecord, f64) {
     let started_wall = Instant::now();
@@ -206,7 +228,7 @@ fn render_job(
         if attempt > 1 && job.settings.delay_s > 0 {
             std::thread::sleep(Duration::from_secs(job.settings.delay_s));
         }
-        last = render_attempt(job, blender, attempt, stop, live);
+        last = render_attempt(job, blender, attempt, stop, stop_after_frame, live);
         job.push_attempt(last.clone());
         let _ = job.save();
         if last.ok {
@@ -292,19 +314,46 @@ fn render_attempt(
     blender: &PathBuf,
     attempt: u32,
     stop: &Arc<AtomicBool>,
+    stop_after_frame: &Arc<AtomicBool>,
     live: Option<&Arc<Mutex<LiveState>>>,
 ) -> AttemptRecord {
     let log_path = job.logs_dir().join(format!("attempt_{:03}.log", attempt));
     let cmd = build_command(job, blender);
     emit(live, format!("{} attempt {}: {:?}", job.name, attempt, cmd));
 
-    let outcome = run_blender(
-        &cmd,
-        &log_path,
-        job.settings.timeout_min,
-        stop,
-        |_| {},
-    );
+    // track the current frame / progress for the GUI live tab
+    let live_c = live.cloned();
+    let job_name = job.name.clone();
+    let stop_after = stop_after_frame.clone();
+    let mut frame_started = false;
+    let outcome = run_blender(&cmd, &log_path, job.settings.timeout_min, stop, move |line: &str| {
+        if let Some(f) = parse_frame(line) {
+            frame_started = true;
+            if let Some(l) = &live_c {
+                let mut g = l.lock().unwrap();
+                g.cur_job = job_name.clone();
+                g.cur_frame = f;
+                g.cur_pct = 0.0;
+            }
+        }
+        if let Some(p) = parse_pct(line) {
+            if let Some(l) = &live_c {
+                let mut g = l.lock().unwrap();
+                g.cur_pct = p;
+            }
+        }
+        if line.contains("Saved:") && frame_started {
+            frame_started = false;
+            if let Some(l) = &live_c {
+                let mut g = l.lock().unwrap();
+                g.cur_pct = 100.0;
+            }
+            // "stop after frame": this frame is done, stop the Blender run
+            if stop_after.load(Ordering::Relaxed) {
+                stop.store(true, Ordering::Relaxed);
+            }
+        }
+    });
 
     // count done frames from the log ("Fra:42 ... Saved: '...'" per frame)
     for (frame, secs) in parse_saved_frames(&log_path) {
@@ -335,27 +384,68 @@ fn render_attempt(
     }
 }
 
-/// Parse a Blender log for saved frames. Blender prints e.g.
-///   Fra:42 Mem:... | Saved: '/path/frame_0042.png'
-/// We match the Fra of each Saved line (Blender prints Fra on the same line).
+/// "Fra:42 Mem:..." -> Some(42)
+fn parse_frame(line: &str) -> Option<i32> {
+    let rest = line.strip_prefix("Fra:")?;
+    let num: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    num.parse().ok()
+}
+
+/// Progress percent from "Sample 230/4096" style lines (Cycles etc.).
+fn parse_pct(line: &str) -> Option<f32> {
+    let idx = line.find('/')?;
+    let head = &line[..idx];
+    let tail = &line[idx + 1..];
+    let num: String = head
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let den: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let n: f32 = num.parse().ok()?;
+    let d: f32 = den.parse().ok()?;
+    if n <= 0.0 || d < 2.0 || n > d || d > 100_000_000.0 {
+        return None;
+    }
+    Some((n / d * 100.0).min(100.0))
+}
+
+/// Parse a Blender log for saved frames and their render times. Blender prints
+/// e.g. "Fra:42 Mem:... | Saved: '/path/frame_0042.png'" followed by a
+/// "Time: 00:00:05" line with that frame's render time.
 fn parse_saved_frames(log_path: &std::path::Path) -> Vec<(i32, Option<f64>)> {
     let mut out = Vec::new();
     let Ok(text) = std::fs::read_to_string(log_path) else {
         return out;
     };
     for line in text.lines() {
-        if !line.contains("Saved:") {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("Fra:") {
-            let num: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '-')
-                .collect();
-            if let Ok(n) = num.parse::<i32>() {
+        if let Some(n) = parse_frame(line) {
+            if line.contains("Saved:") {
                 out.push((n, None));
+            }
+        } else if let Some(rest) = line.strip_prefix("Time:") {
+            if let Some(secs) = parse_hms(rest) {
+                if let Some((_, s)) = out.last_mut() {
+                    *s = Some(secs);
+                }
             }
         }
     }
     out
+}
+
+/// " 00:01:07 ..." -> seconds
+fn parse_hms(rest: &str) -> Option<f64> {
+    let t = rest.trim();
+    let mut it = t.split(':');
+    let h: f64 = it.next()?.trim().parse().ok()?;
+    let m: f64 = it.next()?.trim().parse().ok()?;
+    let s: f64 = it.next()?.trim().split_whitespace().next()?.parse().ok()?;
+    Some(h * 3600.0 + m * 60.0 + s)
 }

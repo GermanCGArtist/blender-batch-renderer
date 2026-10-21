@@ -90,6 +90,9 @@ pub struct JobSettings {
     /// Output image format, e.g. PNG, OPEN_EXR, FFMPEG.
     #[serde(default = "d_png")]
     pub format: String,
+    /// Blender executable for this job, or "auto".
+    #[serde(default = "d_auto")]
+    pub blender: String,
 }
 
 fn d_start() -> i32 { 1 }
@@ -99,6 +102,7 @@ fn d_pct() -> u32 { 100 }
 fn d_attempts() -> u32 { 3 }
 fn d_auto() -> String { "auto".to_string() }
 fn d_png() -> String { "PNG".to_string() }
+fn d_true() -> bool { true }
 
 impl Default for JobSettings {
     fn default() -> Self {
@@ -113,6 +117,7 @@ impl Default for JobSettings {
             timeout_min: 0,
             engine: d_auto(),
             format: d_png(),
+            blender: d_auto(),
         }
     }
 }
@@ -154,6 +159,9 @@ pub struct Job {
     pub status: Status,
     #[serde(default)]
     pub status_note: String,
+    /// Disabled jobs stay in the queue but are skipped by the runner.
+    #[serde(default = "d_true")]
+    pub enabled: bool,
     #[serde(default)]
     pub settings: JobSettings,
     #[serde(default)]
@@ -178,6 +186,7 @@ impl Job {
             blend: blend.to_string_lossy().to_string(),
             status: Status::Queued,
             status_note: String::new(),
+            enabled: true,
             settings,
             frames: BTreeMap::new(),
             attempts: Vec::new(),

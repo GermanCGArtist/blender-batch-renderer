@@ -40,6 +40,27 @@ bbr gui                                    # desktop window (build with --featur
 - Ctrl+C / Stop kills the current Blender process; finished frames are kept and
   the job resumes where it left off.
 
+## GUI
+
+Build with `cargo build --release --features gui` and run `bbr gui` for the
+desktop window — the same layout as the Python app:
+
+- Toolbar: add .blend files (or drop them onto the window), new folder,
+  remove, move up/down, Start, Stop after frame, Stop now, Pause, workers,
+  Settings, Quit.
+- Queue tree: folder groups, enable checkboxes, per-job status, progress,
+  frames, ETA, and per-job actions (retry failed frames, start over,
+  continue with changed file, open render folder / report, move to folder).
+- Details panel: a Live tab (current frame and progress of the running job,
+  job statistics, frame render times) and a Job settings tab with a persistent
+  draft + Apply / Set as defaults.
+- Bottom panel: Console (live Blender output) and Messages.
+- Settings dialog: scan for Blender installs, add one manually, defaults for
+  new jobs, workers.
+
+Not ported (no backend in the Rust core yet): the Machines tab / network
+rendering, Issues (preflight), preview encoding, status page, updater.
+
 ## On-disk layout (unchanged from the Python version)
 
 - App data (`queue.json`, `installs.json`):
@@ -62,7 +83,7 @@ bbr gui                                    # desktop window (build with --featur
 | `bbr/reports.py`     | `src/reports.rs`   |
 | `bbr/storage.py`     | `src/storage.rs`   |
 | `bbr/cli.py`         | `src/cli.rs`       |
-| `bbr/gui/` (PySide6)  | `src/gui.rs` (egui, feature `gui`) |
+| `bbr/gui/` (PySide6)  | `src/gui/` (egui, feature `gui`) |
 
 ## Not ported yet
 

@@ -13,7 +13,7 @@ path = "src/main.rs"
 [features]
 default = []
 # The desktop GUI (egui). Build with: cargo build --features gui
-gui = ["dep:eframe"]
+gui = ["dep:eframe", "dep:rfd"]
 
 [dependencies]
 anyhow = "1"
@@ -25,6 +25,7 @@ csv = "1"
 rust_xlsxwriter = "0.79"
 ctrlc = "3"
 eframe = { version = "0.29", optional = true }
+rfd = { version = "0.15", optional = true }
 
 [profile.release]
 lto = true

@@ -172,6 +172,7 @@ pub fn main() -> Result<()> {
                 workers,
                 blender,
                 stop_after_job,
+                stop_after_frame: Default::default(),
             };
             println!("rendering with {} worker(s) - Ctrl+C stops", cfg.workers);
             let summary = run_session(queue, &cfg, &stop, &Default::default(), None)?;

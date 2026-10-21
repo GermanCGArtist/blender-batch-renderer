@@ -172,6 +172,116 @@ impl JobQueue {
         job.save()?;
         Ok(true)
     }
+
+    /// Enable/disable a job. Disabled jobs are skipped by the runner.
+    pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<bool> {
+        let jobs = self.load_jobs();
+        let Some(mut job) = jobs.into_iter().find(|j| j.name == name) else {
+            return Ok(false);
+        };
+        if enabled {
+            if job.status == Status::OnHold {
+                job.status = Status::Queued;
+                job.status_note.clear();
+            }
+        } else if job.status.runnable() {
+            job.status = Status::OnHold;
+            job.status_note = "disabled".to_string();
+        }
+        job.enabled = enabled;
+        job.save()?;
+        Ok(true)
+    }
+
+    /// The .blend was saved again after frames were rendered: accept the
+    /// change, keep the finished frames and queue the job again.
+    pub fn accept_changed_blend(&mut self, name: &str) -> bool {
+        let Some(mut job) = self.load_job(name) else {
+            return false;
+        };
+        job.blend_stamp = job.current_blend_stamp();
+        job.status = Status::Queued;
+        job.status_note.clear();
+        job.save().is_ok()
+    }
+
+    /// Create a new empty folder group.
+    pub fn new_folder(&mut self, name: &str) -> Result<()> {
+        let name = safe_name(name);
+        if self.folders.iter().any(|f| f.name == name) {
+            bail!("folder already exists: {}", name);
+        }
+        self.folders.push(QueueFolder {
+            name,
+            jobs: Vec::new(),
+        });
+        self.save()
+    }
+
+    /// Move a job one position up (up = true) or down within its group.
+    pub fn move_job(&mut self, name: &str, up: bool) -> Result<bool> {
+        let Some(job) = self.load_job(name) else {
+            return Ok(false);
+        };
+        let path = job.folder.clone();
+        let swap = |list: &mut Vec<String>| -> bool {
+            if let Some(i) = list.iter().position(|p| p == &path) {
+                let j = if up {
+                    i.saturating_sub(1)
+                } else {
+                    (i + 1).min(list.len() - 1)
+                };
+                if i != j {
+                    list.swap(i, j);
+                    return true;
+                }
+            }
+            false
+        };
+        let moved = if self.jobs.iter().any(|p| p == &path) {
+            swap(&mut self.jobs)
+        } else {
+            let mut moved = false;
+            for f in &mut self.folders {
+                if f.jobs.iter().any(|p| p == &path) {
+                    moved = swap(&mut f.jobs);
+                    break;
+                }
+            }
+            moved
+        };
+        if moved {
+            self.save()?;
+        }
+        Ok(moved)
+    }
+
+    /// Move a job into a folder group (None = top level).
+    pub fn move_to_folder(&mut self, name: &str, folder: Option<&str>) -> Result<bool> {
+        let Some(job) = self.load_job(name) else {
+            return Ok(false);
+        };
+        let path = job.folder.clone();
+        self.jobs.retain(|p| p != &path);
+        for f in &mut self.folders {
+            f.jobs.retain(|p| p != &path);
+        }
+        match folder {
+            Some(g) => {
+                if let Some(f) = self.folders.iter_mut().find(|f| f.name == g) {
+                    f.jobs.push(path);
+                } else {
+                    self.folders.push(QueueFolder {
+                        name: g.to_string(),
+                        jobs: vec![path],
+                    });
+                }
+            }
+            None => self.jobs.push(path),
+        }
+        self.save()?;
+        Ok(true)
+    }
 }
 
 fn default_root() -> PathBuf {
