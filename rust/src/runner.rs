@@ -4,7 +4,7 @@
 use crate::installs::resolve_blender;
 use crate::jobqueue::JobQueue;
 use crate::models::{AttemptRecord, Job, Status};
-use crate::process::{run_blender, RunOutcome};
+use crate::process::run_blender;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
