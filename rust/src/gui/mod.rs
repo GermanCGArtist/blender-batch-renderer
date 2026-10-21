@@ -586,6 +586,7 @@ impl eframe::App for BbrApp {
             let mut buffer = self.new_folder.clone().unwrap();
             let mut open = true;
             let mut create = false;
+            let mut cancel = false;
             egui::Window::new("New folder")
                 .open(&mut open)
                 .resizable(false)
@@ -593,18 +594,17 @@ impl eframe::App for BbrApp {
                     ui.text_edit_singleline(&mut buffer);
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
-                            open = false;
+                            cancel = true;
                         }
                         if ui
                             .add_enabled(!buffer.trim().is_empty(), egui::Button::new("Create"))
                             .clicked()
                         {
                             create = true;
-                            open = false;
                         }
                     });
                 });
-            if !open {
+            if !open || create || cancel {
                 if create {
                     let name = buffer.trim().to_string();
                     let _ = self.queue.lock().unwrap().new_folder(&name);
