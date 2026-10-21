@@ -326,7 +326,7 @@ fn render_attempt(
     let job_name = job.name.clone();
     let stop_after = stop_after_frame.clone();
     let mut frame_started = false;
-    let outcome = run_blender(&cmd, &log_path, job.settings.timeout_min, stop, move |line: &str| {
+    let outcome = match run_blender(&cmd, &log_path, job.settings.timeout_min, stop, move |line: &str| {
         if let Some(f) = parse_frame(line) {
             frame_started = true;
             if let Some(l) = &live_c {
@@ -353,12 +353,28 @@ fn render_attempt(
                 stop.store(true, Ordering::Relaxed);
             }
         }
-    })
-    .unwrap_or(RunOutcome {
-        exit_code: None,
-        timed_out: true,
-        killed: true,
-    });
+    }) {
+        Ok(o) => o,
+        Err(e) => {
+            emit(live, format!(
+                "ERROR starting Blender: {} (command: {})",
+                e,
+                cmd.first().cloned().unwrap_or_default()
+            ));
+            // write the error into the attempt log too
+            let _ = std::fs::write(&log_path, format!("bbr: could not start Blender: {}\ncommand: {:?}\n", e, cmd));
+            return AttemptRecord {
+                index: attempt,
+                started: Job::now(),
+                ended: Job::now(),
+                ok: false,
+                exit_code: None,
+                frames_done: 0,
+                frames_failed: job.frames_missing().len() as u32,
+                log: log_path.to_string_lossy().to_string(),
+            };
+        }
+    };
 
     // count done frames from the log ("Fra:42 ... Saved: '...'" per frame)
     for (frame, secs) in parse_saved_frames(&log_path) {
