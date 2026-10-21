@@ -339,6 +339,41 @@ GraphSync(g5, q4).apply()
 check(q4.find(a.id).enabled and not q4.find(b.id).enabled and q4.find(b.id).settings.frame_start == 3,
       "converting an old queue changes no job")
 
+print("damaged job files don't stop the app")
+dq = os.path.join(TMP, "damaged")
+bad_dirs = {}
+for name, content in (("no_blend", {"name": "x", "settings": {}}), ("not_dict", [1, 2]),
+                      ("bad_settings", None), ("garbage", "{not json")):
+    d = os.path.join(dq, name)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "job.json"), "w") as f:
+        if name == "bad_settings":
+            json.dump({"blend_path": film, "folder": d, "name": "bs", "settings": [1], "frames": [], "attempts": {}}, f)
+        elif isinstance(content, str):
+            f.write(content)
+        else:
+            json.dump(content, f)
+    bad_dirs[name] = d
+good = JobQueue(os.path.join(TMP, "good.json")).add(blend("fine"), JobSettings())
+qpath = os.path.join(TMP, "damaged_queue.json")
+with open(qpath, "w") as f:
+    json.dump({"groups": [None, "x"], "jobs": [bad_dirs["no_blend"], bad_dirs["not_dict"], bad_dirs["garbage"],
+                                               bad_dirs["bad_settings"], "", os.path.join(TMP, "nowhere"), good.folder],
+               "graph": "nonsense"}, f)
+dq_ = JobQueue(qpath)
+try:
+    warns = dq_.load()
+    ok = True
+except Exception as e:  # noqa: BLE001
+    warns, ok = [repr(e)], False
+check(ok, "a queue with damaged job files loads")
+check(sorted(j.name for j in dq_.jobs) == ["bs", "fine"], "good jobs are kept, a job with odd fields is repaired")
+check(len(warns) == 5 and any("has no blend_path" in w and "contains: name, settings" in w for w in warns),
+      "each dropped job gets a message saying why")
+with open(qpath, "w") as f:
+    f.write("[1, 2]")
+check(JobQueue(qpath).load() and True, "a queue.json that isn't an object starts an empty queue with a message")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 print("ALL PASSED" if not failures else f"{len(failures)} FAILED:\n  " + "\n  ".join(failures))

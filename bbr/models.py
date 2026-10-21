@@ -387,11 +387,43 @@ class Job:
         self.ensure_folders()
         atomic_write_json(self.job_file, self.to_dict())
 
+    REQUIRED = ("blend_path", "folder", "name")
+
     @classmethod
     def load(cls, folder: str) -> Optional["Job"]:
-        d = read_json(Path(folder) / "job.json")
-        if not d:
-            return None
-        j = cls.from_dict(d)
+        return cls.load_checked(folder)[0]
+
+    @classmethod
+    def load_checked(cls, folder: str):
+        """(job, None), or (None, why it could not be loaded). A damaged or foreign job.json must never
+        stop the app from starting: the queue drops that entry with a message instead."""
+        if not folder or not isinstance(folder, str):
+            return None, "empty folder entry in the queue"
+        p = Path(folder) / "job.json"
+        if not p.exists():
+            return None, "no job.json in the folder"
+        d = read_json(p)
+        if not isinstance(d, dict) or not d:
+            return None, "job.json is empty or not readable"
+        found = sorted(d)
+        if d.get("folder") is None:
+            d["folder"] = str(folder)
+        if d.get("name") is None and d.get("blend_path"):
+            d["name"] = Path(folder).name
+        missing = [k for k in cls.REQUIRED if not d.get(k)]
+        if missing:
+            keys = ", ".join(found[:12]) or "none"
+            return None, f"job.json has no {', '.join(missing)} (it contains: {keys})"
+        if not isinstance(d.get("settings") or {}, dict):
+            d["settings"] = {}
+        for k in ("frames", "approvals"):
+            if not isinstance(d.get(k) or {}, dict):
+                d[k] = {}
+        if not isinstance(d.get("attempts") or [], list):
+            d["attempts"] = []
+        try:
+            j = cls.from_dict(d)
+        except (TypeError, ValueError) as e:
+            return None, f"job.json could not be read ({e})"
         j.folder = str(folder)   # folder may have been moved
-        return j
+        return j, None

@@ -74,15 +74,18 @@ class JobQueue:
         """Load all jobs. Returns warnings (missing folders etc.)."""
         warnings = []
         data = read_json(self.path, {}) or {}
+        if not isinstance(data, dict):
+            data = {}
+            warnings.append("queue.json could not be read – starting with an empty queue")
         self.groups = [dict({"enabled": True, "expanded": True, "render_root": ""}, **g)
-                       for g in data.get("groups", [])]
-        self.graph = data.get("graph") or None
+                       for g in (data.get("groups") or []) if isinstance(g, dict) and g.get("id")]
+        self.graph = data.get("graph") if isinstance(data.get("graph"), dict) else None
         self.jobs = []
-        for folder in data.get("jobs", []):
-            j = Job.load(folder)
+        for folder in (data.get("jobs") or []):
+            j, why = Job.load_checked(folder)
             if j is None:
-                warnings.append(f"Job folder missing or unreadable, dropped from the queue: {folder} "
-                                "(use 'Add existing job folder…' if you moved it)")
+                warnings.append(f"Job dropped from the queue ({why}): {folder or '–'}. Its files stay on disk; "
+                                "use 'Add existing job folder…' if you moved it.")
                 continue
             if j.status == RENDERING:          # app quit or crashed mid-render
                 j.status = STOPPED
@@ -163,9 +166,9 @@ class JobQueue:
             self.graph = snap.get("graph")
             self.jobs = []
             for e in snap["jobs"]:
-                j = Job.load(e["folder"])
+                j, why = Job.load_checked(e["folder"])
                 if j is None:
-                    warnings.append(f"Job folder not found: {e['folder']}")
+                    warnings.append(f"Job left out ({why}): {e['folder'] or '–'}")
                     continue
                 if j.status == RENDERING:
                     j.status, j.status_note = STOPPED, "interrupted (app was closed)"
