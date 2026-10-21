@@ -1,0 +1,12 @@
+[package]
+name = "bbr-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bbr"
+path = "src/main.rs"
+
+[dependencies]
+bbr-core = { path = "../bbr-core" }

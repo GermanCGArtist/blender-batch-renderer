@@ -16,3 +16,4 @@ dist/
 *.blend1
 render/
 exmaple_render/
+target/
