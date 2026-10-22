@@ -371,6 +371,9 @@ class Job:
         d = read_json(Path(folder) / "job.json")
         if not d:
             return None
-        j = cls.from_dict(d)
+        try:
+            j = cls.from_dict(d)
+        except (TypeError, KeyError, ValueError):
+            return None          # damaged or incompatible job.json: skip it instead of crashing the app
         j.folder = str(folder)   # folder may have been moved
         return j
